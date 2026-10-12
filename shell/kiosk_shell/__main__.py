@@ -1,3 +1,3 @@
-from kiosk_shell.app import main
+from kiosk_shell.main_desktop import main
 
 raise SystemExit(main())

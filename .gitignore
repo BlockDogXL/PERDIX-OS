@@ -1,4 +1,5 @@
 # mkarchiso work directory and built ISOs (tools/build-iso.sh)
 /work/
+/build/
 /out/
 __pycache__/

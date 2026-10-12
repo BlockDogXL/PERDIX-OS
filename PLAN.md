@@ -111,14 +111,18 @@ UEFI
 ### Phase 5 — The desktop shell (PyQt5)
 1. `steps/70-shell.sh` — install `python-pyqt5 python-evdev python-dbus`, copy
    `shell/` to `/opt/kiosk-shell`, install `kiosk-session` to `/usr/local/bin`.
-2. Shell features, in build order:
-   1. Full-screen frameless window, cursor hidden on gamepad use, theme loader.
-   2. Home screen: big tiles — **Steam**, **Settings**, **Power**.
-   3. Launcher service: start Steam (`steam -gamepadui`), hide/minimise the shell while
-      it runs, restore when the process exits.
+2. Shell features, in build order (`[x]` = in `kiosk_shell/main_desktop.py`):
+   1. [x] Full-screen frameless window that ignores close requests (Alt+F4, WM close,
+      Ctrl+C) and re-enters full screen if minimised. Black + neon-blue theme, animated logo.
+   2. [x] Home screen tiles: **Open Games (Steam)**, **My Files** (read-only browser locked
+      to the home folder), **Antivirus Scan** (ClamAV `clamscan` on the home folder;
+      `clamav-freshclam.service` keeps definitions current), **Shut Down System**
+      (confirm dialog with Shut Down / Restart / Cancel).
+   3. [x] Launcher service: start Steam (`KIOSK_STEAM_CMD`, default `steam -gamepadui`); the
+      shell stays underneath, pauses its animation, and comes back to the front on exit.
    4. Gamepad navigation (`input/gamepad.py`, evdev → Qt key events).
    5. Settings: Wi-Fi (NetworkManager D-Bus), volume (`wpctl`), resolution (`xrandr`).
-   6. Power menu: `systemctl poweroff/reboot` (allowed by the polkit rule).
+   6. [x] Power: `systemctl poweroff/reboot` (allowed by the polkit rule).
    7. Optional: list installed Steam games by parsing `steamapps/*.acf` and launch
       them directly with `steam steam://rungameid/<appid>`.
 3. `kiosk-session` wraps the shell in a restart loop with crash back-off and logs
@@ -145,6 +149,8 @@ UEFI
    - No desktop environment: only Xorg + Openbox + the PyQt5 shell.
    - Live limits: everything written (Steam client, games) lives in a 4 GB RAM overlay and is
      lost on reboot. Proton is not a pacman package; Steam downloads it on first use.
+   - `build_iso.sh` (repo root) is a standalone alternative: it starts from Arch's releng
+     profile, writes its config inline and only copies `shell/kiosk_shell` from the repo.
 2. **Installer ISO (todo):** add an unattended installer that partitions a disk and runs
    `install/install.sh` in a chroot, so Steam and games persist.
 3. Test the ISO in the VM, then on real AMD/Intel/NVIDIA hardware.
@@ -179,6 +185,7 @@ All step scripts must be **idempotent** (safe to run twice) and use `set -euo pi
 perdix-os/
 ├── PLAN.md                     ← this file
 ├── README.md
+├── build_iso.sh                ← standalone ISO build from Arch's releng profile
 ├── install/
 │   ├── install.sh              ← entry point (run as root)
 │   ├── lib/common.sh
@@ -215,9 +222,9 @@ perdix-os/
 │   ├── pyproject.toml
 │   ├── kiosk_shell/
 │   │   ├── __main__.py
-│   │   ├── app.py
-│   │   ├── ui/                 ← screens and widgets
-│   │   ├── services/           ← launcher, power, network, audio
+│   │   ├── main_desktop.py     ← the desktop UI (home, files, scan, shutdown dialog)
+│   │   ├── config.py           ← reads /etc/kiosk/kiosk.conf
+│   │   ├── services/           ← launcher, power, antivirus, network, audio
 │   │   ├── input/              ← gamepad handling
 │   │   └── resources/          ← icons, themes (QSS)
 │   └── tests/

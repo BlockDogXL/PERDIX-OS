@@ -1,4 +1,37 @@
-"""Starts Steam/games, hides the shell while they run, restores it when they exit.
+"""Starts Steam (or any configured program) and reports when it exits."""
 
-TODO (PLAN.md Phase 5.3): QProcess wrapper around KIOSK_STEAM_CMD from /etc/kiosk/kiosk.conf.
-"""
+import shlex
+
+from PyQt5.QtCore import QObject, QProcess, pyqtSignal
+
+
+class AppLauncher(QObject):
+    started = pyqtSignal()
+    finished = pyqtSignal(int)  # exit code
+    failed = pyqtSignal(str)  # could not start; human-readable reason
+
+    def __init__(self, command: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._argv = shlex.split(command)
+        self._process = QProcess(self)
+        # Steam's output ends up in the shell log that kiosk-session writes.
+        self._process.setProcessChannelMode(QProcess.ForwardedChannels)
+        self._process.started.connect(self.started)
+        self._process.finished.connect(lambda code, _status: self.finished.emit(code))
+        self._process.errorOccurred.connect(self._on_error)
+
+    def is_running(self) -> bool:
+        return self._process.state() != QProcess.NotRunning
+
+    def start(self) -> None:
+        if self.is_running():
+            return
+        if not self._argv:
+            self.failed.emit("No command configured.")
+            return
+        self._process.start(self._argv[0], self._argv[1:])
+
+    def _on_error(self, error: QProcess.ProcessError) -> None:
+        # A crash still emits finished(); only a failed start needs reporting here.
+        if error == QProcess.FailedToStart:
+            self.failed.emit(f"Could not start {self._argv[0]}: {self._process.errorString()}")
