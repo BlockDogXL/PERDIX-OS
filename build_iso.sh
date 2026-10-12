@@ -105,8 +105,10 @@ lib32-gamemode
 mangohud
 lib32-mangohud
 cpupower
-# --- System: network, audio, power permissions, antivirus, boot splash ---
+# --- System: network (NetworkManager + nmcli, Wi-Fi via wpa_supplicant), audio, power
+#     permissions, antivirus, boot splash ---
 networkmanager
+wpa_supplicant
 polkit
 pipewire
 pipewire-pulse
@@ -253,8 +255,9 @@ EndSection
 EOF
 
 cat >"$AIROOTFS/etc/polkit-1/rules.d/50-kiosk-power.rules" <<EOF
-// The kiosk user may, without a password: power off, reboot, and run perdix-tune
-// (CPU governor, TCP congestion control, QoS) through pkexec. Nothing else.
+// The kiosk user may, without a password: power off, reboot, run perdix-tune (CPU
+// governor, TCP congestion control, QoS, hardening) through pkexec, and manage Wi-Fi
+// through NetworkManager. Nothing else.
 polkit.addRule(function (action, subject) {
     var allowed = [
         "org.freedesktop.login1.power-off",
@@ -262,6 +265,14 @@ polkit.addRule(function (action, subject) {
         "org.freedesktop.login1.reboot",
         "org.freedesktop.login1.reboot-multiple-sessions",
         "org.perdix.tune",
+        // Network Settings in the Control Center (nmcli): join, scan, disconnect and forget
+        // Wi-Fi networks and turn the radio on or off. Saving a Wi-Fi password writes a
+        // system profile, which NetworkManager otherwise reserves for administrators.
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.settings.modify.system",
+        "org.freedesktop.NetworkManager.settings.modify.own",
+        "org.freedesktop.NetworkManager.enable-disable-wifi",
+        "org.freedesktop.NetworkManager.wifi.scan",
     ];
     if (subject.user === "$KIOSK_USER" && allowed.indexOf(action.id) >= 0) {
         return polkit.Result.YES;

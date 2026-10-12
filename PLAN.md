@@ -35,7 +35,7 @@ general-purpose desktop.
 | Bootloader | **systemd-boot** (UEFI) | Minimal; `timeout 0` hides the menu (hold Space to show it for maintenance). |
 | Kernel | `linux-zen` (fallback: `linux`) | Desktop/gaming tuned scheduler; stock kernel kept as a fallback entry. |
 | Audio | PipeWire (+ `pipewire-pulse`, `lib32-pipewire`) | What Steam/Proton expect today. |
-| Network | NetworkManager (shell drives it via `nmcli`/D-Bus) | Wi-Fi setup from inside the shell. |
+| Network | NetworkManager + `nmcli` (Control Center module 06 drives it) | Wi-Fi setup from inside the shell; Ethernet comes up on its own (DHCP). |
 | Gamepad in shell | `python-evdev` | Reads controllers directly; maps to Qt key events. |
 | Proton | Steam's built-in Proton; optional **Proton-GE** | Steam Play handles Windows titles; GE for extra compatibility. |
 
@@ -122,7 +122,8 @@ UEFI
    3. [x] Launcher service: start Steam (`KIOSK_STEAM_CMD`, default `steam -gamepadui`); the
       shell stays underneath, pauses its animation, and comes back to the front on exit.
    4. Gamepad navigation (`input/gamepad.py`, evdev → Qt key events).
-   5. Settings: Wi-Fi (NetworkManager D-Bus), volume (`wpctl`), resolution (`xrandr`).
+   5. Settings: [x] Wi-Fi and Ethernet (Control Center → Network Settings, `nmcli`; polkit lets the
+      kiosk user join networks), volume (`wpctl`), resolution (`xrandr`).
    6. [x] Power: `systemctl poweroff/reboot` (allowed by the polkit rule).
    6b. [x] Branding: Piri (neon blue) in the centre, Piri icon top-left opening an
        **About System** page (version from `/etc/perdix-release`, kernel, architecture,
@@ -322,7 +323,8 @@ A kiosk with no escape hatch is a brick when something breaks. Plan:
 - [ ] Steam launches in gamepad UI, returns to the shell on exit.
 - [ ] A Proton title (e.g. a free Windows-only game) runs.
 - [ ] Gamepad can navigate every shell screen.
-- [ ] Wi-Fi can be joined from Settings.
+- [ ] Wi-Fi can be joined from Control Center → Network Settings (needs real Wi-Fi hardware).
+- [ ] A network cable works with no action, and again after unplugging and replugging.
 - [ ] Power off / reboot from the shell works without a password.
 - [ ] Maintenance boot entry gives a console login.
 

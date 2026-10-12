@@ -8,8 +8,10 @@ accents, 4 px corners). A vertical menu on the left switches the module shown on
   02 Tactical Scope    crosshair designer and overlay; zoom key (hold to magnify the centre)
   03 Macro Studio      key / text / delay macros, saved as JSON, played through uinput
   04 Game Mode & HUD   ULTRA FPS / COMPETITOR MODE switch; PERDIX HUD theme engine for MangoHud
-  05 Network           Zero-Ping: BBR congestion control and tc QoS (game UDP first)
-  06 Kılavuz           PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
+  05 Zero-Ping         BBR congestion control and tc QoS (game UDP first)
+  06 Network Settings  Wi-Fi and Ethernet through NetworkManager (nmcli): background scan, join
+                       with a password; wired connections come up on their own
+  07 Kılavuz           PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
                        "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
 
 Root-level changes (CPU governor, sysctl, tc, hardening) go through
@@ -71,7 +73,7 @@ from PyQt5.QtWidgets import (
 
 from kiosk_shell import __version__, paths
 from kiosk_shell.services import (competitor, hub_settings, hud, keywatch, kilavuz, macros, magnifier, mouse,
-                                  perflog, theme, tuning)
+                                  network, perflog, theme, tuning)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -363,6 +365,12 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcMoveTo(QRectF(-r, 30 - r, 2 * r, 2 * r), 45)
             p.arcTo(QRectF(-r, 30 - r, 2 * r, 2 * r), 45, 90)
         p.addEllipse(QPointF(0, 30), 4, 4)
+    elif kind == "wifi":
+        for r in (16, 32, 48):
+            p.arcMoveTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50)
+            p.arcTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50, 80)
+        p.addEllipse(QPointF(0, 26), 5, 5)
+        p.moveTo(-44, 40); p.lineTo(44, 40)
     elif kind == "shield":
         p.moveTo(0, -44); p.lineTo(36, -30); p.lineTo(36, 0)
         p.cubicTo(36, 24, 18, 38, 0, 46); p.cubicTo(-18, 38, -36, 24, -36, 0)
@@ -1961,7 +1969,299 @@ class NetworkPage(QWidget):
         self._run(steps, "Restoring defaults…")
 
 
-# --- 06 PERDIX Kılavuz -----------------------------------------------------------------------------
+# --- 06 Network Settings (Wi-Fi & Ethernet) ------------------------------------------------------
+
+CONNECTIVITY = {"full": "ONLINE", "limited": "LIMITED", "portal": "LOGIN PAGE", "none": "OFFLINE"}
+
+
+def signal_bars(signal: int) -> str:
+    bars = max(1, min(4, (signal + 24) // 25))
+    return "▂▄▆█"[:bars] + "·" * (4 - bars) + f"  {signal}%"
+
+
+class WifiPage(QWidget):
+    """Wi-Fi and Ethernet through NetworkManager. The list refreshes every few seconds while the
+    page is open; picking a network and entering its password (Enter) joins it."""
+
+    REFRESH_MS = 10000
+    COLUMNS = ("Network", "Signal", "Security", "Status")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self.state = network.NetworkState(available=False, problem="Not loaded yet.")
+        self.networks: list[network.WifiNetwork] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+        layout.addWidget(PageHeader("06", "Network", "Network & Wi-Fi Settings",
+                                    "Wi-Fi and Ethernet through NetworkManager. A network cable works the moment "
+                                    "it is plugged in; for Wi-Fi, pick a network and enter its password."))
+
+        status_card = Card("Connection")
+        row = QHBoxLayout()
+        self.internet_value = Readout("Internet", small=True)
+        self.ethernet_value = Readout("Ethernet", small=True)
+        self.wifi_value = Readout("Wi-Fi", small=True)
+        self.address_value = Readout("IP address", small=True)
+        for r in (self.internet_value, self.ethernet_value, self.wifi_value, self.address_value):
+            row.addWidget(r)
+        row.addStretch(1)
+        self.wifi_switch = QCheckBox("Wi-Fi on", cursor=Qt.PointingHandCursor)
+        self.wifi_switch.clicked.connect(self.toggle_wifi)
+        row.addWidget(self.wifi_switch)
+        status_card.body.addLayout(row)
+        layout.addWidget(status_card)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(18)
+        layout.addLayout(columns, 1)
+
+        wifi_card = Card("Wi-Fi networks")
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels([c.upper() for c in self.COLUMNS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in (1, 2, 3):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.table.itemSelectionChanged.connect(self.selection_changed)
+        self.table.itemDoubleClicked.connect(lambda _item: self.connect_clicked())
+        wifi_card.body.addWidget(self.table, 1)
+
+        join = QHBoxLayout()
+        self.password = QLineEdit(echoMode=QLineEdit.Password, placeholderText="Select a network")
+        self.password.returnPressed.connect(self.connect_clicked)  # Enter joins: no extra click
+        self.show_password = QCheckBox("Show", cursor=Qt.PointingHandCursor)
+        self.show_password.toggled.connect(
+            lambda on: self.password.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
+        self.connect_button = primary_button("Connect")
+        self.connect_button.setMinimumHeight(40)
+        self.connect_button.clicked.connect(self.connect_clicked)
+        join.addWidget(self.password, 1)
+        join.addWidget(self.show_password)
+        join.addWidget(self.connect_button)
+        wifi_card.body.addLayout(join)
+        actions = QHBoxLayout()
+        self.scan_button = button("Scan now")
+        self.scan_button.clicked.connect(lambda: self.refresh(rescan=True))
+        self.disconnect_button = button("Disconnect")
+        self.disconnect_button.clicked.connect(self.disconnect_clicked)
+        self.forget_button = button("Forget network")
+        self.forget_button.clicked.connect(self.forget_clicked)
+        for b in (self.scan_button, self.disconnect_button, self.forget_button):
+            actions.addWidget(b)
+        actions.addStretch(1)
+        wifi_card.body.addLayout(actions)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        wifi_card.body.addWidget(self.status)
+        columns.addWidget(wifi_card, 6)
+
+        wired = Card("Ethernet")
+        self.wired_list = QLabel("—", wordWrap=True)
+        self.wired_list.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        wired.body.addWidget(self.wired_list)
+        for title, text in (
+            ("Plug and play", "Plug in a network cable and PERDIX connects on its own: NetworkManager asks "
+                              "the router for an address (DHCP). There is nothing to set up."),
+            ("Wi-Fi", "The list refreshes every few seconds while this page is open. Select a network, "
+                      "type its password and press Enter. The password is kept for the next boot, "
+                      "readable only by the system."),
+            ("Both", "With a cable and Wi-Fi at once, the cable is preferred: it has lower, steadier "
+                     "ping for online games."),
+        ):
+            wired.body.addWidget(tracked_label(title, "EyebrowOrange", 2))
+            wired.body.addWidget(QLabel(text, objectName="Muted", wordWrap=True))
+        wired.body.addStretch(1)
+        columns.addWidget(wired, 4)
+
+        self._timer = QTimer(self, interval=self.REFRESH_MS, timeout=self.refresh)
+        self.selection_changed()
+
+    # --- background refresh ---
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh(rescan=not self.state.available)
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def _run(self, func, done) -> None:
+        self._worker = Worker(func, self)
+        self._worker.done.connect(done)
+        self._worker.start()
+
+    def refresh(self, rescan: bool = False) -> None:
+        if self.busy():
+            return  # a scan or a connection attempt is still running
+        if rescan:
+            set_status(self.status, "Scanning for Wi-Fi networks…", True)
+        self._run(lambda: network.state(rescan), self.show_state)
+
+    def show_state(self, state) -> None:
+        if isinstance(state, Exception):
+            state = network.NetworkState(available=False, problem=str(state))
+        self.state = state
+        if self.status.text() == "Scanning for Wi-Fi networks…":
+            self.status.setText("")
+        if not state.available:
+            for r in (self.internet_value, self.ethernet_value, self.wifi_value, self.address_value):
+                r.set("—")
+            self.wired_list.setText("—")
+            self.fill_table([])
+            set_status(self.status, state.problem, False)
+            self.update_buttons()
+            return
+        self.internet_value.set(CONNECTIVITY.get(state.connectivity, "—"))
+        wired = state.of_type("ethernet")
+        wired_up = [d for d in wired if d.connected]
+        self.ethernet_value.set("CONNECTED" if wired_up else "NO CABLE" if wired else "NONE")
+        wifi = state.wifi_device
+        if wifi is None:
+            self.wifi_value.set("NO ADAPTER")
+        elif not state.wifi_enabled:
+            self.wifi_value.set("OFF")
+        else:
+            self.wifi_value.set(wifi.connection.upper() if wifi.connected else "NOT CONNECTED")
+        connected = wired_up + ([wifi] if wifi is not None and wifi.connected else [])
+        addresses = [state.addresses[d.name] for d in connected if state.addresses.get(d.name)]
+        self.address_value.set(addresses[0] if addresses else "—")  # the cable's address first
+        self.wifi_switch.setEnabled(wifi is not None)
+        self.wifi_switch.setChecked(state.wifi_enabled and wifi is not None)
+        lines = []
+        for d in wired:
+            if d.connected:
+                address = state.addresses.get(d.name)
+                lines.append(f"{d.name}: connected{f' · {address}' if address else ''}")
+            elif d.state == "unavailable":
+                lines.append(f"{d.name}: no cable plugged in")
+            else:
+                lines.append(f"{d.name}: {d.state}")
+        self.wired_list.setText("\n".join(lines) or "No wired network port found.")
+        self.fill_table(state.networks)
+        if wifi is None:
+            set_status(self.status, "No Wi-Fi adapter found. Use a network cable, or plug in a USB Wi-Fi adapter.",
+                       False)
+        elif not state.wifi_enabled:
+            set_status(self.status, "Wi-Fi is off. Turn it on to see networks.", True)
+        self.update_buttons()
+
+    def fill_table(self, networks: list[network.WifiNetwork]) -> None:
+        selected = self.selected()
+        keep = selected.ssid if selected else None
+        self.networks = networks
+        self.table.blockSignals(True)
+        self.table.setRowCount(len(networks))
+        for row, net in enumerate(networks):
+            status = "Connected" if net.in_use else "Saved" if net.saved else ""
+            cells = (net.ssid, signal_bars(net.signal), net.security or "Open", status)
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 3 and net.in_use:
+                    item.setForeground(qcolor(ICE))
+                if column == 2 and net.open:
+                    item.setForeground(qcolor(ORANGE))
+                self.table.setItem(row, column, item)
+            if net.ssid == keep:
+                self.table.selectRow(row)
+        self.table.blockSignals(False)
+        self.selection_changed()
+
+    # --- selection and actions ---
+
+    def selected(self) -> network.WifiNetwork | None:
+        rows = self.table.selectionModel().selectedRows()
+        return self.networks[rows[0].row()] if rows and rows[0].row() < len(self.networks) else None
+
+    def selection_changed(self) -> None:
+        net = self.selected()
+        if net is None:
+            hint, enabled = "Select a network", False
+        elif net.in_use:
+            hint, enabled = "Connected", False
+        elif net.open:
+            hint, enabled = "Open network: no password needed", False
+        elif net.enterprise:
+            hint, enabled = "Enterprise (802.1X) networks are not supported here", False
+        elif net.saved:
+            hint, enabled = "Saved: leave empty to use the saved password", True
+        else:
+            hint, enabled = f"Password for {net.ssid}", True
+        self.password.setPlaceholderText(hint)
+        self.password.setEnabled(enabled)
+        if not enabled:
+            self.password.clear()
+        self.update_buttons()
+
+    def update_buttons(self) -> None:
+        net, idle = self.selected(), not self.busy()
+        wifi = self.state.wifi_device if self.state.available else None
+        self.connect_button.setEnabled(idle and net is not None and not net.in_use and not net.enterprise)
+        self.disconnect_button.setEnabled(idle and wifi is not None and wifi.connected)
+        self.forget_button.setEnabled(idle and net is not None and net.saved)
+        self.scan_button.setEnabled(idle and wifi is not None and self.state.wifi_enabled)
+
+    def _action(self, func, busy_text: str) -> None:
+        if self.busy():
+            return
+        set_status(self.status, busy_text, True)
+        self._run(func, self._action_done)
+        self.update_buttons()
+
+    def _action_done(self, result) -> None:
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+        else:
+            set_status(self.status, result, True)
+        self.password.clear()
+        self.refresh()
+
+    def connect_clicked(self) -> None:
+        net = self.selected()
+        if net is None or net.in_use or net.enterprise or self.busy():
+            return
+        password = self.password.text() if self.password.isEnabled() else ""
+        if not password and not net.open and not net.saved:
+            set_status(self.status, f"Enter the password for {net.ssid}.", False)
+            self.password.setFocus()
+            return
+        device = self.state.wifi_device.name if self.state.wifi_device else None
+        self._action(lambda: network.connect_wifi(net.ssid, password or None, device, net.security),
+                     f"Connecting to {net.ssid}…")
+
+    def disconnect_clicked(self) -> None:
+        wifi = self.state.wifi_device
+        if wifi is not None and wifi.connected:
+            name = wifi.connection
+            self._action(lambda: (network.disconnect(wifi.name), f"Disconnected from {name}.")[1], "Disconnecting…")
+
+    def forget_clicked(self) -> None:
+        net = self.selected()
+        if net is not None and net.saved:
+            self._action(lambda: (network.forget(net.ssid), f"Forgot {net.ssid}; its password was removed.")[1],
+                         f"Forgetting {net.ssid}…")
+
+    def toggle_wifi(self, on: bool) -> None:
+        self._action(lambda: (network.set_wifi_enabled(on), f"Wi-Fi turned {'on' if on else 'off'}.")[1],
+                     "Turning Wi-Fi on…" if on else "Turning Wi-Fi off…")
+
+    def shutdown(self) -> None:
+        self._timer.stop()
+        if self.busy():
+            self._worker.wait()
+
+
+# --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
 def turkish_upper(text: str) -> str:
@@ -1987,7 +2287,7 @@ class SecurityPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
         layout.addWidget(PageHeader(
-            "06", turkish_upper("Güvenlik"), turkish_upper("PERDIX Kılavuz"),
+            "07", turkish_upper("Güvenlik"), turkish_upper("PERDIX Kılavuz"),
             "Açık portları ve zayıf dosya izinlerini denetler. Güvenle düzeltilebilenler "
             "\"Açıkları Kapat\" ile tek tuşla kapatılır; geri kalanlar ne yapmanız gerektiğiyle "
             "birlikte listelenir.",
@@ -2210,8 +2510,9 @@ class HubWindow(QWidget):
         ("02", "scope", "Tactical Scope", "Crosshair designer · overlay"),
         ("03", "macro", "Macro Studio", "Key, text and delay chains"),
         ("04", "hud", "Game Mode & HUD", "Competitor · PERDIX HUD"),
-        ("05", "net", "Network", "Zero-Ping · BBR · QoS"),
-        ("06", "shield", "Kılavuz", "Güvenlik · port · izin"),
+        ("05", "net", "Zero-Ping", "BBR · QoS · game priority"),
+        ("06", "wifi", "Network Settings", "Wi-Fi · Ethernet"),
+        ("07", "shield", "Kılavuz", "Güvenlik · port · izin"),
     ]
 
     def __init__(self) -> None:
@@ -2232,8 +2533,8 @@ class HubWindow(QWidget):
         middle.addWidget(self.sidebar)
         self.pages = QStackedWidget()
         self.sens, self.scope, self.macro = SensPage(), ScopePage(), MacroPage()
-        self.hud, self.network, self.security = HudPage(), NetworkPage(), SecurityPage()
-        for page in (self.sens, self.scope, self.macro, self.hud, self.network, self.security):
+        self.hud, self.network, self.wifi, self.security = HudPage(), NetworkPage(), WifiPage(), SecurityPage()
+        for page in (self.sens, self.scope, self.macro, self.hud, self.network, self.wifi, self.security):
             holder = QWidget()
             holder_layout = QVBoxLayout(holder)
             holder_layout.setContentsMargins(32, 26, 32, 26)
@@ -2253,6 +2554,7 @@ class HubWindow(QWidget):
         if self.macro.runner is not None and self.macro.runner.isRunning():
             self.macro.runner.stop_requested = True
             self.macro.runner.wait(2000)
+        self.wifi.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

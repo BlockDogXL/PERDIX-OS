@@ -21,7 +21,7 @@ python3 apps/perdix-studio/perdix_studio.py
 # PERDIX Sentinel / Kılavuz: open-port and file-permission audit (Turkish report)
 sudo python3 apps/perdix-kilavuz/perdix_kilavuz.py          # --json, --ports-only, --perms-only
 sudo python3 apps/perdix-kilavuz/perdix_kilavuz.py --fix    # hardening plan; --apply applies it
-#   (also in Control Center: module 06 Kılavuz, with the 'Açıkları Kapat' button)
+#   (also in Control Center: module 07 Kılavuz, with the 'Açıkları Kapat' button)
 
 # Build the live ISO (on an Arch host, needs archiso >= 86 and ~10 GB free):
 sudo pacman -S --needed archiso

@@ -4,7 +4,7 @@
 prints a Turkish report with a suggested fix for each finding. The audit reads the kernel's
 socket tables (`/proc/net/{tcp,tcp6,udp,udp6}`, plus `ss` when installed) and file metadata, and
 never contacts other hosts. It changes nothing unless you ask for hardening with `--apply`. It
-runs as a plain script, as a set of functions you can import, and as module 06 of PERDIX Control
+runs as a plain script, as a set of functions you can import, and as module 07 of PERDIX Control
 Center (below).
 
 ## Run
@@ -61,7 +61,7 @@ high-severity finding is still open.
 
 ## In PERDIX Control Center
 
-Module **06 Kılavuz** (`shell/kiosk_shell/perdix_hub.py`, all text in Turkish) scans on first
+Module **07 Kılavuz** (`shell/kiosk_shell/perdix_hub.py`, all text in Turkish) scans on first
 visit and on **Taramayı Başlat**. It shows the findings by severity, with the full finding and its
 fix for the selected row. Scanning runs as the logged-in user, because it only reads.
 
