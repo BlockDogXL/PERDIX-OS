@@ -27,3 +27,9 @@ usbutils
 # Control Center "Diagnostics": vulkaninfo and glxinfo
 vulkan-tools
 mesa-utils
+# Control Center "Bluetooth": bluetoothd, bluetoothctl and Blueman; pipewire-audio carries
+# PipeWire's Bluetooth audio plugin (headphones and speakers as sound outputs).
+bluez
+bluez-utils
+blueman
+pipewire-audio

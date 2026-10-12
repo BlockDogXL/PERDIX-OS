@@ -144,6 +144,11 @@ usbutils
 # System Diagnostics: vulkaninfo, glxinfo
 vulkan-tools
 mesa-utils
+# Bluetooth: bluetoothd, bluetoothctl, Blueman; pipewire-audio has the Bluetooth audio plugin
+bluez
+bluez-utils
+blueman
+pipewire-audio
 clamav
 plymouth
 EOF
@@ -170,6 +175,11 @@ ln -sf /usr/lib/systemd/system/NetworkManager.service \
 # Keeps ClamAV's virus definitions up to date for the "Antivirus Scan" button.
 ln -sf /usr/lib/systemd/system/clamav-freshclam.service \
     "$AIROOTFS/etc/systemd/system/multi-user.target.wants/clamav-freshclam.service"
+# Bluetooth starts when an adapter shows up (what `systemctl enable bluetooth` does).
+mkdir -p "$AIROOTFS/etc/systemd/system/bluetooth.target.wants"
+ln -sf /usr/lib/systemd/system/bluetooth.service \
+    "$AIROOTFS/etc/systemd/system/bluetooth.target.wants/bluetooth.service"
+ln -sf /usr/lib/systemd/system/bluetooth.service "$AIROOTFS/etc/systemd/system/dbus-org.bluez.service"
 
 # Lock root: nobody gets a root login on the kiosk.
 printf 'root:*:14871::::::\n' >"$AIROOTFS/etc/shadow"

@@ -10,4 +10,5 @@ source "$(dirname "$0")/../lib/common.sh"
 # TODO: install_rootfs_file etc/kiosk/kiosk.conf
 # TODO: write /etc/perdix-release (VERSION=..., EDITION="Installed") for the About System page
 # TODO: systemctl enable clamav-freshclam.service (virus definitions for the Antivirus Scan page)
+# TODO: systemctl enable bluetooth.service (Control Center "Bluetooth" page)
 warn "70-shell: not implemented yet"

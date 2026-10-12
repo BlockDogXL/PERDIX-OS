@@ -18,6 +18,8 @@ Network & Sound
                        with a password; wired connections come up on their own
   Audio                PipeWire output/microphone device and volume (wpctl); one-click EasyEffects
                        effects: volume boost, bass boost, microphone noise suppression
+  Bluetooth            scan, pair (just-works agent), trust and connect headphones, speakers, game
+                       controllers, mice and keyboards (bluetoothctl); Blueman for the rest
 System
   Task Manager         CPU, RAM and GPU use with history, running programs, End task / Kill;
                        hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
@@ -94,7 +96,8 @@ from PyQt5.QtWidgets import (
 )
 
 from kiosk_shell import __version__, paths
-from kiosk_shell.services import (audio, competitor, devices, diagnostics, hub_settings, hud, keywatch, kilavuz,
+from kiosk_shell.services import (audio, bluetooth, competitor, devices, diagnostics, hub_settings, hud, keywatch,
+                                  kilavuz,
                                   macros, magnifier, mouse, network, perflog, region, taskman, theme, tuning,
                                   vision)
 
@@ -373,6 +376,7 @@ NAV = [
     ("network", "net", "Zero-Ping", "BBR · QoS · game priority", "Network & Sound"),
     ("wifi", "wifi", "Network Settings", "Wi-Fi · Ethernet", "Network & Sound"),
     ("audio", "audio", "Audio", "Volume · EasyEffects", "Network & Sound"),
+    ("bluetooth", "bluetooth", "Bluetooth", "Headsets · controllers", "Network & Sound"),
     ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
     ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
     ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
@@ -423,6 +427,9 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50, 80)
         p.addEllipse(QPointF(0, 26), 5, 5)
         p.moveTo(-44, 40); p.lineTo(44, 40)
+    elif kind == "bluetooth":  # the Bluetooth rune
+        p.moveTo(-22, -22); p.lineTo(22, 20); p.lineTo(0, 42); p.lineTo(0, -42); p.lineTo(22, -20)
+        p.lineTo(-22, 22)
     elif kind == "globe":  # a globe with meridians
         p.addEllipse(QPointF(0, 0), 42, 42)
         p.addEllipse(QPointF(0, 0), 18, 42)
@@ -3584,6 +3591,237 @@ class RegionPage(QWidget):
             self._worker.wait()
 
 
+# --- Bluetooth -------------------------------------------------------------------------------------------
+
+
+class BluetoothPage(QWidget):
+    """Scan, pair, connect and forget Bluetooth devices."""
+
+    COLUMNS = ("Device", "Type", "Status", "Battery")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self.adapter: bluetooth.Adapter | None = None
+        self.devices: list[bluetooth.Device] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("bluetooth"), "Network & Sound", "Bluetooth",
+                                    "Headphones, speakers, game controllers, mice and keyboards. Pair once; they "
+                                    "reconnect by themselves when switched on."))
+
+        top = Card("Adapter")
+        row = QHBoxLayout()
+        self.adapter_value = Readout("Adapter", small=True)
+        self.power_value = Readout("Bluetooth", small=True)
+        self.connected_value = Readout("Connected", small=True)
+        for r in (self.adapter_value, self.power_value, self.connected_value):
+            row.addWidget(r, 1)
+        self.power = QCheckBox("Bluetooth on", cursor=Qt.PointingHandCursor)
+        self.power.clicked.connect(lambda on: self._run(lambda: bluetooth.set_powered(on), "Switching…"))
+        row.addWidget(self.power)
+        top.body.addLayout(row)
+        layout.addWidget(top)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        card = Card("Devices")
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels([c.upper() for c in self.COLUMNS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in (1, 2, 3):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.table.setMinimumHeight(240)
+        self.table.itemSelectionChanged.connect(self.update_buttons)
+        self.table.itemDoubleClicked.connect(lambda _item: self.primary_action())
+        card.body.addWidget(self.table, 1)
+        actions = QHBoxLayout()
+        self.scan_button = primary_button("Scan for devices")
+        self.scan_button.clicked.connect(self.scan)
+        self.action_button = button("Pair and connect")
+        self.action_button.clicked.connect(self.primary_action)
+        self.forget_button = button("Forget")
+        self.forget_button.clicked.connect(self.forget)
+        self.blueman_button = button("Blueman…")
+        self.blueman_button.setToolTip("Blueman: every Bluetooth setting, file transfer, PIN pairing")
+        self.blueman_button.clicked.connect(self.open_blueman)
+        for b in (self.scan_button, self.action_button, self.forget_button):
+            actions.addWidget(b)
+        actions.addStretch(1)
+        actions.addWidget(self.blueman_button)
+        card.body.addLayout(actions)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        card.body.addWidget(self.status)
+        columns.addWidget(card, 7)
+
+        tips = Card("Pairing mode")
+        for title, text in (
+            ("PlayStation", "DualSense / DualShock 4: hold Create (Share) and the PS button until the light "
+                            "bar flashes quickly."),
+            ("Xbox", "Hold the pair button on top of the controller until the Xbox button flashes fast."),
+            ("Switch Pro", "Hold the small sync button on top until the lights run back and forth."),
+            ("Headphones", "Usually: hold the power or Bluetooth button until the light flashes blue/red. "
+                           "Sound switches to them by itself once connected."),
+        ):
+            tips.body.addWidget(tracked_label(title, "EyebrowOrange", 2))
+            tips.body.addWidget(QLabel(text, objectName="Muted", wordWrap=True))
+        tips.body.addStretch(1)
+        columns.addWidget(tips, 3)
+        layout.addLayout(columns, 1)
+
+        self._timer = QTimer(self, interval=8000, timeout=self.refresh)
+        self.update_buttons()
+
+    # --- state ---
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def refresh(self) -> None:
+        if self.busy():
+            return
+
+        def work():
+            found = bluetooth.adapter()
+            return found, bluetooth.devices() if found else []
+        self._worker = Worker(work, self)
+        self._worker.done.connect(self.show_state)
+        self._worker.start()
+
+    def finished_worker(self) -> None:
+        """The worker that sent this result is only returning now; let it end so busy() is honest."""
+        worker = self.sender()
+        if isinstance(worker, Worker):
+            worker.wait()
+
+    def show_state(self, result) -> None:
+        self.finished_worker()
+        if isinstance(result, Exception):
+            self.adapter, self.devices = None, []
+            set_status(self.status, str(result), False)
+        else:
+            self.adapter, self.devices = result
+            if self.adapter is None:
+                set_status(self.status, "No Bluetooth adapter found. Plug in a USB Bluetooth adapter.", False)
+        a = self.adapter
+        self.adapter_value.set(a.name if a else "NONE")
+        self.power_value.set(("ON" if a.powered else "OFF") if a else "—")
+        self.connected_value.set(str(sum(d.connected for d in self.devices)))
+        self.power.setChecked(bool(a and a.powered))
+        self.power.setEnabled(a is not None)
+        self.fill_table()
+
+    def fill_table(self) -> None:
+        selected = self.selected()
+        keep = selected.address if selected else None
+        self.table.setRowCount(len(self.devices))
+        for row, d in enumerate(self.devices):
+            status = "Connected" if d.connected else "Paired" if d.paired else "Available"
+            cells = (d.name, d.kind, status, f"{d.battery} %" if d.battery is not None else "")
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 0:
+                    item.setData(Qt.UserRole, d.address)
+                    item.setToolTip(d.address)
+                if column == 2 and d.connected:
+                    item.setForeground(qcolor(ICE))
+                elif column == 2 and d.paired:
+                    item.setForeground(qcolor(ORANGE))
+                self.table.setItem(row, column, item)
+            if d.address == keep:
+                self.table.selectRow(row)
+        self.update_buttons()
+
+    def selected(self) -> bluetooth.Device | None:
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        address = self.table.item(rows[0].row(), 0).data(Qt.UserRole)
+        return next((d for d in self.devices if d.address == address), None)
+
+    def update_buttons(self) -> None:
+        d, idle = self.selected(), not self.busy()
+        powered = bool(self.adapter and self.adapter.powered)
+        self.scan_button.setEnabled(idle and powered)
+        self.action_button.setEnabled(idle and powered and d is not None)
+        self.action_button.setText("Disconnect" if d and d.connected else "Connect" if d and d.paired
+                                   else "Pair and connect")
+        self.forget_button.setEnabled(idle and d is not None and d.paired)
+
+    # --- actions ---
+
+    def _run(self, func, busy: str) -> None:
+        if self.busy():
+            self._worker.wait()
+        set_status(self.status, busy, True)
+        self._worker = Worker(func, self)
+        self._worker.done.connect(self._done)
+        self._worker.start()
+        self.update_buttons()
+
+    def _done(self, result) -> None:
+        self.finished_worker()
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+        elif isinstance(result, list):  # a scan returns the device list
+            self.devices = result
+            new = sum(not d.paired for d in result)
+            set_status(self.status, f"Scan finished: {new} device{'s' if new != 1 else ''} to pair."
+                       if new else "Scan finished: no new devices. Is the device in pairing mode?", True)
+            self.fill_table()
+        else:
+            set_status(self.status, result, True)
+        self.update_buttons()
+        if not isinstance(result, list):
+            self.refresh()
+
+    def scan(self) -> None:
+        self._run(lambda: bluetooth.scan(), f"Scanning for {bluetooth.SCAN_SECONDS} seconds… put the device in "
+                                             "pairing mode now.")
+
+    def primary_action(self) -> None:
+        d = self.selected()
+        if d is None or not (self.adapter and self.adapter.powered):
+            return
+        if d.connected:
+            self._run(lambda: bluetooth.disconnect(d.address), f"Disconnecting {d.name}…")
+        elif d.paired:
+            self._run(lambda: bluetooth.connect(d.address), f"Connecting {d.name}…")
+        else:
+            self._run(lambda: bluetooth.pair(d.address), f"Pairing with {d.name}…")
+
+    def forget(self) -> None:
+        d = self.selected()
+        if d is not None and d.paired:
+            self._run(lambda: bluetooth.remove(d.address), f"Forgetting {d.name}…")
+
+    def open_blueman(self) -> None:
+        try:
+            bluetooth.open_blueman()
+        except bluetooth.BluetoothError as error:
+            set_status(self.status, str(error), False)
+
+    def shutdown(self) -> None:
+        self._timer.stop()
+        if self.busy():
+            self._worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -3833,7 +4071,8 @@ class HubWindow(QWidget):
     PAGES = {"sens": "SensPage", "scope": "ScopePage", "macro": "MacroPage", "hud": "HudPage",
              "vision": "VisionPage", "network": "NetworkPage", "wifi": "WifiPage", "audio": "AudioPage",
              "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage",
-             "diagnostics": "DiagnosticsPage", "region": "RegionPage"}
+             "diagnostics": "DiagnosticsPage", "region": "RegionPage",
+             "bluetooth": "BluetoothPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -3886,6 +4125,7 @@ class HubWindow(QWidget):
         self.devices.shutdown()
         self.diagnostics.shutdown()
         self.region.shutdown()
+        self.bluetooth.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)
