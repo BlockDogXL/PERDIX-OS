@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Keeps the desktop shell running: restarts it whenever it exits or crashes.
+set -uo pipefail
+
+[[ -r /etc/kiosk/kiosk.conf ]] && source /etc/kiosk/kiosk.conf
+: "${KIOSK_RESTART_DELAY:=2}"
+
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/kiosk"
+mkdir -p "$log_dir"
+
+while true; do
+    PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell >>"$log_dir/shell.log" 2>&1
+    echo "$(date -Is) shell exited with status $?, restarting" >>"$log_dir/shell.log"
+    sleep "$KIOSK_RESTART_DELAY"
+done

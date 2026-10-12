@@ -1,0 +1,17 @@
+# Core system, display and audio
+base-devel
+git
+networkmanager
+xorg-server
+xorg-xinit
+xorg-xrandr
+xorg-xset
+openbox
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+lib32-pipewire
+noto-fonts
+ttf-liberation
+pciutils

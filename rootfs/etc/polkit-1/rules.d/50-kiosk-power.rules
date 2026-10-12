@@ -1,0 +1,13 @@
+// Let the kiosk user power off, reboot and suspend without a password — nothing else.
+polkit.addRule(function (action, subject) {
+    var allowed = [
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.suspend",
+    ];
+    if (subject.user === "kiosk" && allowed.indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});

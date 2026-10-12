@@ -1,0 +1,6 @@
+# Runtime dependencies of the PyQt5 desktop shell
+python
+python-pyqt5
+python-evdev
+python-dbus
+plymouth

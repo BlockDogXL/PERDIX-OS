@@ -1,0 +1,6 @@
+# Turing (GTX 16xx / RTX 20xx) and newer. Older cards need the legacy driver from the AUR.
+nvidia-open-dkms
+nvidia-utils
+lib32-nvidia-utils
+linux-zen-headers
+linux-headers
