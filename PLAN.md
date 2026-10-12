@@ -134,9 +134,19 @@ UEFI
      and no autologin — see §7).
 
 ### Phase 7 — Packaging (ISO)
-1. `archiso/` — copy the `releng` profile, add our package lists, `rootfs/` as
-   `airootfs/`, and an unattended installer.
-2. Build with `mkarchiso -v -w /tmp/work -o out/ archiso/`.
+1. **Live ISO (script written, not yet test-built):** `sudo tools/build-iso.sh [--nvidia] [--root-password]` on an Arch host
+   with `archiso` ≥ 86. It stages `archiso/` + `rootfs/` + `skel/` + `shell/` into
+   `work/profile`, merges `archiso/packages.live.txt` with `install/packages/{base,boot,gaming,
+   gpu-amd,gpu-intel,shell}.txt`, and runs `mkarchiso`. Output: `out/perdix-os-<date>-x86_64.iso`.
+   - Boots BIOS (syslinux) and UEFI (systemd-boot) with no menu, quiet cmdline and Plymouth.
+   - User `kiosk` (UID 1000, locked password) is created by `etc/sysusers.d/kiosk.conf` and
+     autologged in on tty1 → startx → shell. Root is locked unless `--root-password`.
+   - Maintenance: hold Space (UEFI) or Shift then type `maintenance` (BIOS) → console, no X.
+   - No desktop environment: only Xorg + Openbox + the PyQt5 shell.
+   - Live limits: everything written (Steam client, games) lives in a 4 GB RAM overlay and is
+     lost on reboot. Proton is not a pacman package; Steam downloads it on first use.
+2. **Installer ISO (todo):** add an unattended installer that partitions a disk and runs
+   `install/install.sh` in a chroot, so Steam and games persist.
 3. Test the ISO in the VM, then on real AMD/Intel/NVIDIA hardware.
 
 ---
@@ -157,7 +167,7 @@ UEFI
 | `install/steps/80-lockdown.sh` | Xorg flags, Openbox config, polkit, sysctl. |
 | `rootfs/usr/local/bin/kiosk-session` | Restart loop around the shell. |
 | `tools/run-shell-dev.sh` | Run the shell windowed on a dev machine. |
-| `tools/build-iso.sh` | Wrapper around `mkarchiso`. |
+| `tools/build-iso.sh` | Assemble the archiso profile and build the live ISO (see Phase 7). |
 
 All step scripts must be **idempotent** (safe to run twice) and use `set -euo pipefail`.
 
@@ -173,6 +183,7 @@ perdix-os/
 │   ├── install.sh              ← entry point (run as root)
 │   ├── lib/common.sh
 │   ├── packages/               ← one package per line, '#' comments allowed
+│   │   ├── admin.txt           ← installed system only (base-devel, git)
 │   │   ├── base.txt
 │   │   ├── boot.txt
 │   │   ├── gaming.txt
@@ -210,7 +221,14 @@ perdix-os/
 │   │   ├── input/              ← gamepad handling
 │   │   └── resources/          ← icons, themes (QSS)
 │   └── tests/
-├── archiso/                    ← ISO profile (Phase 7)
+├── archiso/                    ← ISO profile (Phase 7), staged by tools/build-iso.sh
+│   ├── profiledef.sh           ← ISO name, boot modes, file ownership (kiosk = UID 1000)
+│   ├── pacman.conf             ← build-time repos, incl. [multilib]
+│   ├── packages.live.txt       ← kernel, firmware, live-boot hooks, NVK
+│   ├── packages.nvidia.txt     ← proprietary NVIDIA driver (--nvidia)
+│   ├── efiboot/loader/         ← systemd-boot: hidden menu, kiosk + maintenance entries
+│   ├── syslinux/syslinux.cfg   ← BIOS boot, same two entries
+│   └── airootfs/etc/           ← ISO-only files: sysusers kiosk user, mkinitcpio hooks, ...
 ├── tools/                      ← dev helpers
 └── docs/                       ← hardware notes, troubleshooting
 ```

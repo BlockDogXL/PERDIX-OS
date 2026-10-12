@@ -12,12 +12,17 @@ require_root() {
     [[ $EUID -eq 0 ]] || die "run as root (sudo $0)"
 }
 
-# Install every package listed in install/packages/<name>.txt ('#' comments allowed).
+# Print the packages in a list file, one per line ('#' comments and blank lines dropped).
+read_package_list() {
+    [[ -f $1 ]] || die "package list not found: $1"
+    sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$1"
+}
+
+# Install every package listed in install/packages/<name>.txt.
 pacman_install_list() {
-    local list="$KIOSK_ROOT/install/packages/$1.txt"
+    local list="$KIOSK_ROOT/install/packages/$1.txt" pkgs
     [[ -f $list ]] || die "package list not found: $list"
-    local pkgs
-    mapfile -t pkgs < <(sed -e 's/#.*//' -e '/^\s*$/d' "$list")
+    mapfile -t pkgs < <(read_package_list "$list")
     pacman -S --needed --noconfirm "${pkgs[@]}"
 }
 

@@ -1,7 +1,7 @@
 # Core system, display and audio
-base-devel
-git
 networkmanager
+wpa_supplicant
+polkit
 xorg-server
 xorg-xinit
 xorg-xrandr

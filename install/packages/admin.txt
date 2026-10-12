@@ -1,0 +1,3 @@
+# Tools for the admin/maintenance path on an installed system (not on the live ISO)
+base-devel
+git
