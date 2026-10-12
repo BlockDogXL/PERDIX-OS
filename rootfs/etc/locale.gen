@@ -1,0 +1,10 @@
+# Languages PERDIX OS generates (glibc runs locale-gen when it is installed). Region & Language in
+# the Control Center offers exactly these; add a line and run `locale-gen` (root) for more.
+en_US.UTF-8 UTF-8
+en_GB.UTF-8 UTF-8
+tr_TR.UTF-8 UTF-8
+de_DE.UTF-8 UTF-8
+fr_FR.UTF-8 UTF-8
+es_ES.UTF-8 UTF-8
+it_IT.UTF-8 UTF-8
+ru_RU.UTF-8 UTF-8

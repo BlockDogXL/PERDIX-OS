@@ -1,0 +1,5 @@
+rules:      evdev
+model:      pc105
+layout:     us,tr
+variant:    ,f
+options:    grp:alt_shift_toggle

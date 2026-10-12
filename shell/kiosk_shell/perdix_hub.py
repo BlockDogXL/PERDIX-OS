@@ -23,6 +23,8 @@ System
                        hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
   Diagnostics          PERDIX System Diagnostics: GPU, Vulkan/OpenGL, DirectX through Proton (DXVK,
                        VKD3D-Proton), RAM, BIOS, displays, disks; saved or copied as a text report
+  Region & Language    time zone and internet time (timedatectl), keyboard layout with an optional
+                       second one on Alt+Shift (setxkbmap now, localectl for later boots), language
   Devices              motherboard and BIOS, PCI parts (graphics, sound, network, storage) with the
                        driver in use (lspci -k), keyboards / mice / controllers, USB devices (lsusb)
 Maintenance
@@ -93,7 +95,8 @@ from PyQt5.QtWidgets import (
 
 from kiosk_shell import __version__, paths
 from kiosk_shell.services import (audio, competitor, devices, diagnostics, hub_settings, hud, keywatch, kilavuz,
-                                  macros, magnifier, mouse, network, perflog, taskman, theme, tuning, vision)
+                                  macros, magnifier, mouse, network, perflog, region, taskman, theme, tuning,
+                                  vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -373,6 +376,7 @@ NAV = [
     ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
     ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
     ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
+    ("region", "globe", "Region & Language", "Time zone · keyboard · language", "System"),
     ("security", "shield", "Kılavuz", "Güvenlik · port · izin", "Maintenance"),
 ]
 
@@ -419,6 +423,11 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50, 80)
         p.addEllipse(QPointF(0, 26), 5, 5)
         p.moveTo(-44, 40); p.lineTo(44, 40)
+    elif kind == "globe":  # a globe with meridians
+        p.addEllipse(QPointF(0, 0), 42, 42)
+        p.addEllipse(QPointF(0, 0), 18, 42)
+        p.moveTo(-42, 0); p.lineTo(42, 0)
+        p.moveTo(-36, -22); p.lineTo(36, -22); p.moveTo(-36, 22); p.lineTo(36, 22)
     elif kind == "pulse":  # a monitor with a heartbeat line
         p.addRoundedRect(QRectF(-44, -32, 88, 58), 4, 4)
         p.moveTo(-14, 40); p.lineTo(14, 40); p.moveTo(0, 26); p.lineTo(0, 40)
@@ -3385,6 +3394,196 @@ class DiagnosticsPage(QWidget):
             self._worker.wait()
 
 
+# --- Region & Language ---------------------------------------------------------------------------------
+
+
+class RegionPage(QWidget):
+    """Time zone and internet time, keyboard layout(s), system language."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self.state: region.RegionStatus | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("region"), "System", "Region & Language",
+                                    "Where you are, how you type and which language programs use."))
+
+        time_card = Card("Date and time")
+        row = QHBoxLayout()
+        self.clock = Readout("Local time")
+        self.zone_value = Readout("Time zone", small=True)
+        self.sync_value = Readout("Internet time", small=True)
+        for r in (self.clock, self.zone_value, self.sync_value):
+            row.addWidget(r, 1)
+        time_card.body.addLayout(row)
+        zone_row = QHBoxLayout()
+        self.zone = QComboBox(editable=True, insertPolicy=QComboBox.NoInsert)
+        self.zone.completer().setFilterMode(Qt.MatchContains)
+        self.zone.completer().setCaseSensitivity(Qt.CaseInsensitive)
+        self.zone.setMinimumWidth(320)
+        self.zone_button = button("Set time zone")
+        self.zone_button.clicked.connect(self.set_zone)
+        self.ntp = QCheckBox("Set the time automatically from the internet", cursor=Qt.PointingHandCursor)
+        self.ntp.clicked.connect(lambda on: self._run(lambda: region.set_ntp(on)))
+        zone_row.addWidget(self.zone, 1)
+        zone_row.addWidget(self.zone_button)
+        zone_row.addSpacing(16)
+        zone_row.addWidget(self.ntp)
+        time_card.body.addLayout(zone_row)
+        layout.addWidget(time_card)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        keyboard = Card("Keyboard")
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        self.primary = QComboBox()
+        self.secondary = QComboBox()
+        self.secondary.addItem("None", None)
+        for lay, var, name in region.KEYBOARDS:
+            self.primary.addItem(name, (lay, var))
+            self.secondary.addItem(name, (lay, var))
+        form.addWidget(QLabel("Layout"), 0, 0)
+        form.addWidget(self.primary, 0, 1)
+        form.addWidget(QLabel("Second layout"), 1, 0)
+        form.addWidget(self.secondary, 1, 1)
+        form.setColumnStretch(1, 1)
+        keyboard.body.addLayout(form)
+        keyboard.body.addWidget(QLabel("With a second layout, Alt+Shift switches between the two, like on "
+                                       "Windows. Türkçe F is the F-keyboard; Türkçe Q the common one.",
+                                       objectName="Muted", wordWrap=True))
+        self.session_keyboard = QLabel(objectName="Muted", wordWrap=True)
+        keyboard.body.addWidget(self.session_keyboard)
+        self.keyboard_button = primary_button("Apply keyboard")
+        self.keyboard_button.clicked.connect(self.apply_keyboard)
+        keyboard.body.addWidget(self.keyboard_button, 0, Qt.AlignLeft)
+        keyboard.body.addStretch(1)
+        columns.addWidget(keyboard, 1)
+
+        language = Card("Language")
+        self.language = QComboBox()
+        language.body.addWidget(self.language)
+        language.body.addWidget(QLabel("The language of menus in Steam, games and other programs. It applies "
+                                       "after the next login; PERDIX's own screens stay as they are.",
+                                       objectName="Muted", wordWrap=True))
+        self.language_button = button("Apply language")
+        self.language_button.clicked.connect(self.apply_language)
+        language.body.addWidget(self.language_button, 0, Qt.AlignLeft)
+        language.body.addStretch(1)
+        columns.addWidget(language, 1)
+        layout.addLayout(columns)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        layout.addWidget(self.status)
+        layout.addStretch(1)
+
+        self._clock = QTimer(self, interval=1000, timeout=self._tick)
+        self.loaded = False
+
+    def _tick(self) -> None:
+        self.clock.set(QDateTime.currentDateTime().toString("HH:mm:ss"))
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._tick()
+        self._clock.start()
+        if not self.loaded:
+            self.load()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._clock.stop()
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def load(self) -> None:
+        if self.busy():
+            return
+        self.loaded = True
+
+        def work():
+            return region.status(), region.timezones(), region.locales()
+        self._worker = Worker(work, self)
+        self._worker.done.connect(self.show_state)
+        self._worker.start()
+
+    def show_state(self, result) -> None:
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+            for b in (self.zone_button, self.keyboard_button, self.language_button, self.ntp):
+                b.setEnabled(False)
+            return
+        state, zones, locales = result
+        self.state = state
+        t = state.time
+        self.zone_value.set(t.timezone.replace("_", " ") or "—")
+        self.sync_value.set("SYNCED" if t.ntp_synced else "ON" if t.ntp else "OFF")
+        if self.zone.count() != len(zones):
+            self.zone.clear()
+            self.zone.addItems(zones)
+        self.zone.setCurrentText(t.timezone)
+        self.ntp.setChecked(t.ntp)
+        self.ntp.setEnabled(t.can_ntp)
+        self.ntp.setToolTip("" if t.can_ntp else "No network time service on this system")
+        keyboard = state.session or state.system
+        if keyboard.layouts:
+            variants = keyboard.variants + [""] * len(keyboard.layouts)
+            self._select(self.primary, (keyboard.layouts[0], variants[0]))
+            self._select(self.secondary, (keyboard.layouts[1], variants[1]) if len(keyboard.layouts) > 1 else None)
+            names = " + ".join(region.keyboard_name(lay, var) for lay, var in zip(keyboard.layouts, variants))
+            self.session_keyboard.setText(f"Now: {names}")
+        self.language.clear()
+        for locale in locales:
+            self.language.addItem(f"{region.language_name(locale)}  ({locale})", locale)
+            if locale == state.system.lang:
+                self.language.setCurrentIndex(self.language.count() - 1)
+        self.language_button.setEnabled(len(locales) > 1)
+
+    @staticmethod
+    def _select(combo: QComboBox, value) -> None:
+        for i in range(combo.count()):
+            if combo.itemData(i) == value:
+                combo.setCurrentIndex(i)
+                return
+
+    def _run(self, func) -> None:
+        if self.busy():
+            return
+        set_status(self.status, "Applying…", True)
+        self._worker = Worker(func, self)
+        self._worker.done.connect(self._done)
+        self._worker.start()
+
+    def _done(self, result) -> None:
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+        else:
+            set_status(self.status, result, True)
+        self.loaded = False
+        self.load()
+
+    def set_zone(self) -> None:
+        zone = self.zone.currentText().strip().replace(" ", "_")
+        self._run(lambda: region.set_timezone(zone))
+
+    def apply_keyboard(self) -> None:
+        primary, secondary = self.primary.currentData(), self.secondary.currentData()
+        self._run(lambda: region.set_keyboard(primary, secondary))
+
+    def apply_language(self) -> None:
+        locale = self.language.currentData()
+        if locale:
+            self._run(lambda: region.set_language(locale))
+
+    def shutdown(self) -> None:
+        self._clock.stop()
+        if self.busy():
+            self._worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -3634,7 +3833,7 @@ class HubWindow(QWidget):
     PAGES = {"sens": "SensPage", "scope": "ScopePage", "macro": "MacroPage", "hud": "HudPage",
              "vision": "VisionPage", "network": "NetworkPage", "wifi": "WifiPage", "audio": "AudioPage",
              "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage",
-             "diagnostics": "DiagnosticsPage"}
+             "diagnostics": "DiagnosticsPage", "region": "RegionPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -3686,6 +3885,7 @@ class HubWindow(QWidget):
         self.taskman.shutdown()
         self.devices.shutdown()
         self.diagnostics.shutdown()
+        self.region.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

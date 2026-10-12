@@ -267,7 +267,8 @@ for file in usr/local/bin/perdix-tune \
             etc/sysusers.d/perdix.conf \
             etc/systemd/system/perdix-restore.service \
             usr/lib/libreoffice/share/registry/perdix.xcd \
-            etc/xdg/kritarc; do
+            etc/xdg/kritarc \
+            etc/locale.gen; do
     install -D -m 644 -- "$REPO_DIR/rootfs/$file" "$AIROOTFS/$file"
 done
 ln -sf /etc/systemd/system/perdix-restore.service \
@@ -306,6 +307,11 @@ polkit.addRule(function (action, subject) {
         "org.freedesktop.NetworkManager.settings.modify.own",
         "org.freedesktop.NetworkManager.enable-disable-wifi",
         "org.freedesktop.NetworkManager.wifi.scan",
+        // Region & Language in the Control Center: time zone, internet time, keyboard, language.
+        "org.freedesktop.timedate1.set-timezone",
+        "org.freedesktop.timedate1.set-ntp",
+        "org.freedesktop.locale1.set-locale",
+        "org.freedesktop.locale1.set-keyboard",
     ];
     if (subject.user === "$KIOSK_USER" && allowed.indexOf(action.id) >= 0) {
         return polkit.Result.YES;

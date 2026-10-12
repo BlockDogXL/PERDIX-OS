@@ -17,6 +17,11 @@ polkit.addRule(function (action, subject) {
         "org.freedesktop.NetworkManager.settings.modify.own",
         "org.freedesktop.NetworkManager.enable-disable-wifi",
         "org.freedesktop.NetworkManager.wifi.scan",
+        // Region & Language in the Control Center: time zone, internet time, keyboard, language.
+        "org.freedesktop.timedate1.set-timezone",
+        "org.freedesktop.timedate1.set-ntp",
+        "org.freedesktop.locale1.set-locale",
+        "org.freedesktop.locale1.set-keyboard",
     ];
     if (subject.user === "kiosk" && allowed.indexOf(action.id) >= 0) {
         return polkit.Result.YES;
