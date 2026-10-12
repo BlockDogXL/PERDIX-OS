@@ -1,0 +1,81 @@
+[
+ {
+  "id": 34,
+  "type": "PipeWire:Interface:Metadata",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x"
+  ],
+  "props": {
+   "client.id": 32,
+   "factory.id": 6,
+   "metadata.name": "default",
+   "module.id": 5,
+   "object.serial": 34
+  },
+  "metadata": [
+   {
+    "subject": 0,
+    "key": "default.audio.sink",
+    "type": "Spa:String:JSON",
+    "value": {
+     "name": "perdix-test-headset"
+    }
+   },
+   {
+    "subject": 0,
+    "key": "default.audio.source",
+    "type": "Spa:String:JSON",
+    "value": {
+     "name": "perdix-test-mic"
+    }
+   },
+   {
+    "subject": 0,
+    "key": "default.configured.audio.sink",
+    "type": "Spa:String:JSON",
+    "value": {
+     "name": "perdix-test-headset"
+    }
+   }
+  ]
+ },
+ {
+  "id": 38,
+  "type": "PipeWire:Interface:Node",
+  "info": {
+   "props": {
+    "media.class": "Audio/Sink",
+    "node.name": "perdix-test-speakers",
+    "node.description": "Test Speakers",
+    "object.serial": 38
+   }
+  }
+ },
+ {
+  "id": 43,
+  "type": "PipeWire:Interface:Node",
+  "info": {
+   "props": {
+    "media.class": "Audio/Sink",
+    "node.name": "perdix-test-headset",
+    "node.description": "Test Headset",
+    "object.serial": 44
+   }
+  }
+ },
+ {
+  "id": 48,
+  "type": "PipeWire:Interface:Node",
+  "info": {
+   "props": {
+    "media.class": "Audio/Source/Virtual",
+    "node.name": "perdix-test-mic",
+    "node.description": "Test Microphone",
+    "object.serial": 50
+   }
+  }
+ }
+]

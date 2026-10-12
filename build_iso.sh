@@ -126,6 +126,12 @@ pipewire-pulse
 pipewire-alsa
 wireplumber
 lib32-pipewire
+# Sound effects for the Control Center's Audio module (EasyEffects with LSP and Calf plugins);
+# rtkit gives PipeWire real-time priority
+easyeffects
+calf
+lsp-plugins-lv2
+rtkit
 clamav
 plymouth
 EOF
@@ -211,8 +217,10 @@ unset f
 # Minimal window manager: lets Steam and games take focus and go full screen.
 openbox &
 
-# Re-apply the mouse acceleration curve chosen in PERDIX Control Center (xinput resets at login).
-PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.perdix_hub --apply-saved >/dev/null 2>&1
+# Re-apply the mouse acceleration curve (xinput resets at login) and start EasyEffects if sound
+# effects are on, both chosen in PERDIX Control Center. In the background: EasyEffects can take a
+# few seconds to start, and the desktop must not wait for it.
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.perdix_hub --apply-saved >/dev/null 2>&1 &
 
 # Launch the PERDIX desktop, and restart it if it ever exits or crashes.
 mkdir -p "$HOME/.local/state/perdix"

@@ -8,3 +8,10 @@ clamav
 xorg-xinput
 xorg-xrandr
 polkit
+# Control Center "Audio": EasyEffects for one-click effects (volume boost uses an LSP limiter,
+# bass boost the Calf bass enhancer, mic noise suppression RNNoise, which EasyEffects pulls in);
+# rtkit gives PipeWire real-time priority for low, steady latency.
+easyeffects
+calf
+lsp-plugins-lv2
+rtkit

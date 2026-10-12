@@ -34,7 +34,7 @@ general-purpose desktop.
 | Silent boot | Kernel `quiet` flags + **Plymouth** splash + hidden bootloader menu | Hides kernel/systemd text from power-on to the shell. |
 | Bootloader | **systemd-boot** (UEFI) | Minimal; `timeout 0` hides the menu (hold Space to show it for maintenance). |
 | Kernel | `linux-zen` (fallback: `linux`) | Desktop/gaming tuned scheduler; stock kernel kept as a fallback entry. |
-| Audio | PipeWire (+ `pipewire-pulse`, `lib32-pipewire`) | What Steam/Proton expect today. |
+| Audio | PipeWire (+ `pipewire-pulse`, `lib32-pipewire`), WirePlumber, EasyEffects | What Steam/Proton expect today; EasyEffects for one-click effects. |
 | Network | NetworkManager + `nmcli` (Control Center module 06 drives it) | Wi-Fi setup from inside the shell; Ethernet comes up on its own (DHCP). |
 | Gamepad in shell | `python-evdev` | Reads controllers directly; maps to Qt key events. |
 | Proton | Steam's built-in Proton; optional **Proton-GE** | Steam Play handles Windows titles; GE for extra compatibility. |
@@ -125,7 +125,9 @@ UEFI
       shell stays underneath, pauses its animation, and comes back to the front on exit.
    4. Gamepad navigation (`input/gamepad.py`, evdev → Qt key events).
    5. Settings: [x] Wi-Fi and Ethernet (Control Center → Network Settings, `nmcli`; polkit lets the
-      kiosk user join networks), volume (`wpctl`), resolution (`xrandr`).
+      kiosk user join networks), [x] sound (Control Center → Audio: PipeWire devices and volume
+      through `wpctl`, one-click EasyEffects volume boost / bass boost / mic noise suppression),
+      resolution (`xrandr`).
    6. [x] Power: `systemctl poweroff/reboot` (allowed by the polkit rule).
    6b. [x] Branding: Piri (neon blue) in the centre, Piri icon top-left opening an
        **About System** page (version from `/etc/perdix-release`, kernel, architecture,

@@ -13,6 +13,8 @@ accents, 4 px corners). A vertical menu on the left switches the module shown on
                        with a password; wired connections come up on their own
   07 Kılavuz           PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
                        "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
+  08 Audio             PipeWire output/microphone device and volume (wpctl); one-click EasyEffects
+                       effects: volume boost, bass boost, microphone noise suppression
 
 Root-level changes (CPU governor, sysctl, tc, hardening) go through
 `pkexec /usr/local/bin/perdix-tune`.
@@ -25,8 +27,8 @@ System settings (game mode, network, HUD, GPU profile) are recorded by perdix-tu
 Run:   python -m kiosk_shell.perdix_hub          (from shell/)
        python kiosk_shell/perdix_hub.py
        python -m kiosk_shell.perdix_hub --maximized     (as the desktop's Control Center tile does)
-       python -m kiosk_shell.perdix_hub --apply-saved   (re-apply mouse settings, no window;
-                                                          run from .xinitrc at session start)
+       python -m kiosk_shell.perdix_hub --apply-saved   (re-apply mouse settings and sound effects,
+                                                          no window; run from .xinitrc at session start)
 """
 
 from __future__ import annotations
@@ -72,8 +74,8 @@ from PyQt5.QtWidgets import (
 )
 
 from kiosk_shell import __version__, paths
-from kiosk_shell.services import (competitor, hub_settings, hud, keywatch, kilavuz, macros, magnifier, mouse,
-                                  network, perflog, theme, tuning)
+from kiosk_shell.services import (audio, competitor, hub_settings, hud, keywatch, kilavuz, macros, magnifier,
+                                  mouse, network, perflog, theme, tuning)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -371,6 +373,12 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50, 80)
         p.addEllipse(QPointF(0, 26), 5, 5)
         p.moveTo(-44, 40); p.lineTo(44, 40)
+    elif kind == "audio":  # speaker with sound waves
+        p.moveTo(-40, -14); p.lineTo(-22, -14); p.lineTo(0, -34); p.lineTo(0, 34); p.lineTo(-22, 14)
+        p.lineTo(-40, 14); p.closeSubpath()
+        for r in (16, 32):
+            p.arcMoveTo(QRectF(4 - r, -r, 2 * r, 2 * r), -50)
+            p.arcTo(QRectF(4 - r, -r, 2 * r, 2 * r), -50, 100)
     elif kind == "shield":
         p.moveTo(0, -44); p.lineTo(36, -30); p.lineTo(36, 0)
         p.cubicTo(36, 24, 18, 38, 0, 46); p.cubicTo(-18, 38, -36, 24, -36, 0)
@@ -498,7 +506,7 @@ class NavButton(QPushButton):
         self.index, self.icon, self.title, self.subtitle = index, icon, title, subtitle
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(68)
+        self.setFixedHeight(62)  # eight modules fit the 720 px minimum window height
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def enterEvent(self, event) -> None:
@@ -2261,6 +2269,197 @@ class WifiPage(QWidget):
             self._worker.wait()
 
 
+# --- 08 Audio & Effects ---------------------------------------------------------------------------
+
+LEVELS = [("off", "Off"), ("low", "Low"), ("medium", "Medium"), ("high", "High")]
+
+
+class AudioPage(QWidget):
+    """PipeWire devices and volume, and EasyEffects as three one-click effects."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self.effects = audio.Effects.from_dict(hub_settings.load().get("audio"))
+        self.outputs: list[audio.Device] = []
+        self.inputs: list[audio.Device] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+        layout.addWidget(PageHeader("08", "Audio", "Audio & Effects",
+                                    "PipeWire sound, plus one-click EasyEffects: louder volume, deeper bass and "
+                                    "a microphone without background noise."))
+
+        devices = QHBoxLayout()
+        devices.setSpacing(18)
+        self.output_device, self.output_volume, self.output_mute, output_card = self._device_card("Output")
+        self.input_device, self.input_volume, self.input_mute, input_card = self._device_card("Microphone")
+        devices.addWidget(output_card)
+        devices.addWidget(input_card)
+        layout.addLayout(devices)
+        self.output_device.activated.connect(lambda i: self._set_default(self.outputs, i))
+        self.input_device.activated.connect(lambda i: self._set_default(self.inputs, i))
+        self.output_mute.toggled.connect(lambda on: self._call(audio.set_muted, on, audio.SINK))
+        self.input_mute.toggled.connect(lambda on: self._call(audio.set_muted, on, audio.SOURCE))
+        # Volume changes go to PipeWire a moment after the slider stops, not on every pixel.
+        self._volume_timer = QTimer(self, singleShot=True, interval=120, timeout=self._send_volumes)
+        self.output_volume.valueChanged.connect(lambda _v: self._volume_timer.start())
+        self.input_volume.valueChanged.connect(lambda _v: self._volume_timer.start())
+
+        effects_card = Card("Effects  //  EasyEffects")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(10)
+        self.boost_row, self.boost_group = segmented(LEVELS, self.effects.volume_boost)
+        self.bass_row, self.bass_group = segmented(LEVELS, self.effects.bass_boost)
+        self.noise_row, self.noise_group = segmented([("off", "Off"), ("on", "On")],
+                                                     "on" if self.effects.noise_suppression else "off")
+        for row, (title, text, segments) in enumerate((
+            ("Volume boost", "Up to +9 dB louder than 100 %; a limiter keeps it from distorting.", self.boost_row),
+            ("Bass boost", "Fuller low end through the Calf bass enhancer.", self.bass_row),
+            ("Mic noise suppression", "RNNoise filters fans, keys and traffic out of your voice.",
+             self.noise_row),
+        )):
+            label = QVBoxLayout()
+            label.setSpacing(2)
+            label.addWidget(tracked_label(title, "EyebrowOrange", 2))
+            label.addWidget(QLabel(text, objectName="Muted", wordWrap=True))
+            grid.addLayout(label, row, 0)
+            grid.addLayout(segments, row, 1)
+        grid.setColumnStretch(0, 1)
+        effects_card.body.addLayout(grid)
+        for group in (self.boost_group, self.bass_group, self.noise_group):
+            group.buttonClicked.connect(lambda _b: self.apply_effects())
+        bottom = QHBoxLayout()
+        self.effects_status = QLabel(objectName="Muted", wordWrap=True)
+        bottom.addWidget(self.effects_status, 1)
+        self.open_button = button("Open EasyEffects (equalizer)")
+        self.open_button.clicked.connect(self.open_easyeffects)
+        bottom.addWidget(self.open_button)
+        effects_card.body.addLayout(bottom)
+        layout.addWidget(effects_card)
+        layout.addStretch(1)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        layout.addWidget(self.status)
+        self.show_effects_state()
+
+    def _device_card(self, title: str):
+        card = Card(title)
+        device = QComboBox()
+        volume = LabeledSlider("Volume", 0, 100, 50, lambda v: f"{v} %")
+        mute = QCheckBox("Mute", cursor=Qt.PointingHandCursor)
+        card.body.addWidget(device)
+        card.body.addWidget(volume)
+        card.body.addWidget(mute)
+        return device, volume, mute, card
+
+    # --- PipeWire ---
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Devices and volumes from PipeWire (quick: a few ms)."""
+        try:
+            self.outputs = audio.devices("Audio/Sink")
+            self.inputs = audio.devices("Audio/Source")
+            out, mic = audio.get_volume(audio.SINK), audio.get_volume(audio.SOURCE) if self.inputs else None
+        except audio.AudioError as error:
+            set_status(self.status, str(error), False)
+            for widget in (self.output_device, self.output_volume, self.output_mute,
+                           self.input_device, self.input_volume, self.input_mute):
+                widget.setEnabled(False)
+            return
+        for combo, items, empty in ((self.output_device, self.outputs, "No speakers or headphones found"),
+                                    (self.input_device, self.inputs, "No microphone found")):
+            combo.blockSignals(True)
+            combo.clear()
+            for d in items:
+                combo.addItem(d.description)
+            if not items:
+                combo.addItem(empty)
+            combo.setEnabled(bool(items))
+            combo.blockSignals(False)
+        for slider, mute, volume in ((self.output_volume, self.output_mute, out), (self.input_volume, self.input_mute, mic)):
+            slider.setEnabled(volume is not None)
+            mute.setEnabled(volume is not None)
+            if volume is not None:
+                slider.slider.blockSignals(True)
+                slider.slider.setValue(round(volume.level * 100))
+                slider.readout.setText(f"{round(volume.level * 100)} %")
+                slider.slider.blockSignals(False)
+                mute.blockSignals(True)
+                mute.setChecked(volume.muted)
+                mute.blockSignals(False)
+        self.status.setText("")
+
+    def _set_default(self, devices: list[audio.Device], index: int) -> None:
+        if 0 <= index < len(devices):
+            self._call(audio.set_default, devices[index])
+            self.refresh()
+
+    def _send_volumes(self) -> None:
+        if self.output_volume.isEnabled():
+            self._call(audio.set_volume, self.output_volume.value() / 100, audio.SINK)
+        if self.input_volume.isEnabled():
+            self._call(audio.set_volume, self.input_volume.value() / 100, audio.SOURCE)
+
+    def _call(self, func, *args) -> None:
+        try:
+            func(*args)
+        except audio.AudioError as error:
+            set_status(self.status, str(error), False)
+
+    # --- EasyEffects ---
+
+    def current_effects(self) -> audio.Effects:
+        return audio.Effects(group_value(self.boost_group) or "off", group_value(self.bass_group) or "off",
+                             group_value(self.noise_group) == "on")
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def apply_effects(self) -> None:
+        if self.busy():
+            return  # the latest choice is applied when this run ends
+        self.effects = self.current_effects()
+        hub_settings.save_section("audio", self.effects.to_dict())
+        set_status(self.effects_status, "Applying…" if not self.effects.any else
+                   "Starting EasyEffects…" if not audio.easyeffects_running() else "Applying…", True)
+        effects = self.effects
+        self._worker = Worker(lambda: audio.apply_effects(effects), self)
+        self._worker.done.connect(self._effects_done)
+        self._worker.start()
+
+    def _effects_done(self, result) -> None:
+        if isinstance(result, Exception):
+            set_status(self.effects_status, str(result), False)
+        else:
+            set_status(self.effects_status, result, True)
+        if self.current_effects() != self.effects:  # changed while applying
+            self.apply_effects()
+
+    def show_effects_state(self) -> None:
+        if not audio.easyeffects_installed():
+            set_status(self.effects_status, "EasyEffects is not installed.", False)
+            for group in (self.boost_group, self.bass_group, self.noise_group):
+                for b in group.buttons():
+                    b.setEnabled(False)
+            self.open_button.setEnabled(False)
+        elif self.effects.any:
+            set_status(self.effects_status, "Effects on: " + ", ".join(audio.describe(self.effects)) + ".", True)
+        else:
+            self.effects_status.setText("All effects off: sound goes straight to the speakers, with no added latency.")
+
+    def open_easyeffects(self) -> None:
+        self._call(audio.open_easyeffects)
+
+    def shutdown(self) -> None:
+        if self.busy():
+            self._worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -2513,6 +2712,7 @@ class HubWindow(QWidget):
         ("05", "net", "Zero-Ping", "BBR · QoS · game priority"),
         ("06", "wifi", "Network Settings", "Wi-Fi · Ethernet"),
         ("07", "shield", "Kılavuz", "Güvenlik · port · izin"),
+        ("08", "audio", "Audio", "Volume · EasyEffects"),
     ]
 
     def __init__(self) -> None:
@@ -2534,7 +2734,8 @@ class HubWindow(QWidget):
         self.pages = QStackedWidget()
         self.sens, self.scope, self.macro = SensPage(), ScopePage(), MacroPage()
         self.hud, self.network, self.wifi, self.security = HudPage(), NetworkPage(), WifiPage(), SecurityPage()
-        for page in (self.sens, self.scope, self.macro, self.hud, self.network, self.wifi, self.security):
+        self.audio = AudioPage()
+        for page in (self.sens, self.scope, self.macro, self.hud, self.network, self.wifi, self.security, self.audio):
             holder = QWidget()
             holder_layout = QVBoxLayout(holder)
             holder_layout.setContentsMargins(32, 26, 32, 26)
@@ -2555,6 +2756,7 @@ class HubWindow(QWidget):
             self.macro.runner.stop_requested = True
             self.macro.runner.wait(2000)
         self.wifi.shutdown()
+        self.audio.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)
@@ -2591,14 +2793,26 @@ def apply_saved_mouse_settings() -> int:
     return 0
 
 
+def apply_saved_audio_effects() -> int:
+    """Start EasyEffects with the saved effects at login (nothing to do when they are all off)."""
+    effects = audio.Effects.from_dict(hub_settings.load().get("audio"))
+    if effects.any and audio.easyeffects_installed():
+        try:
+            print(audio.apply_effects(effects))
+        except audio.AudioError as error:
+            print(f"Sound effects: {error}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PERDIX Control Center")
     parser.add_argument("--maximized", action="store_true", help="open maximised (kiosk desktop)")
     parser.add_argument("--apply-saved", action="store_true",
-                        help="re-apply saved mouse settings and exit (for session start)")
+                        help="re-apply saved mouse settings and sound effects, then exit (session start)")
     args, qt_args = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
     if args.apply_saved:
-        return apply_saved_mouse_settings()
+        apply_saved_mouse_settings()
+        return apply_saved_audio_effects()
 
     app = QApplication([sys.argv[0], *qt_args])
     app.setApplicationName("PERDIX Control Center")

@@ -16,6 +16,8 @@ if [ -d /etc/X11/xinit/xinitrc.d ]; then
     unset f
 fi
 openbox &
-# Re-apply the mouse acceleration curve chosen in PERDIX Control Center (xinput resets at login).
-PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.perdix_hub --apply-saved >/dev/null 2>&1
+# Re-apply the mouse acceleration curve (xinput resets at login) and start EasyEffects if sound
+# effects are on, both chosen in PERDIX Control Center. In the background: EasyEffects can take a
+# few seconds to start, and the desktop must not wait for it.
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.perdix_hub --apply-saved >/dev/null 2>&1 &
 exec /usr/local/bin/kiosk-session
