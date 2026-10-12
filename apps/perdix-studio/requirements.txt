@@ -1,0 +1,4 @@
+# PERDIX Studio runtime dependencies (Python 3.10+)
+PyQt5>=5.15
+QScintilla>=2.13,<3
+# For running the tests: pip install pytest

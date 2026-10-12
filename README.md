@@ -15,6 +15,9 @@ Arch host. The step scripts in `install/steps/` and most of the shell are still 
 # Open PERDIX Control Center (esports tuning hub) on a dev machine:
 cd shell && python -m kiosk_shell.perdix_hub
 
+# PERDIX Studio (code editor + modding tools): see apps/perdix-studio/README.md
+python3 apps/perdix-studio/perdix_studio.py
+
 # Build the live ISO (on an Arch host, needs archiso >= 86 and ~10 GB free):
 sudo pacman -S --needed archiso
 sudo ./build_iso.sh                  # standalone, based on Arch's releng profile
