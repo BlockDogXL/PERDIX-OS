@@ -1,0 +1,13 @@
+# Office and drawing, opened from the desktop's Office / Drawing tiles and from My Files.
+# LibreOffice: Writer, Calc, Impress, Draw; opens and saves .docx/.xlsx/.pptx and OpenDocument.
+libreoffice-fresh
+libreoffice-fresh-tr
+hunspell-en_us
+# Metric-compatible stand-ins for Calibri and Cambria, so Office documents keep their layout
+# (Liberation covers Arial, Times New Roman and Courier New; it is in base.txt).
+ttf-carlito
+ttf-caladea
+# Krita: digital painting and image editing
+krita
+# Brings an already open LibreOffice or Krita window back to the front from the desktop tile
+wmctrl

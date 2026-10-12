@@ -28,7 +28,7 @@ WORK_MARKER=.perdix-iso-work
 
 # Package lists from install/packages/ that go onto the ISO. gpu-nvidia.txt is left
 # out: it uses DKMS, which the live ISO replaces with archiso/packages.nvidia.txt.
-ISO_PACKAGE_LISTS=(base boot gaming gpu-amd gpu-intel shell)
+ISO_PACKAGE_LISTS=(base boot gaming gpu-amd gpu-intel shell office)
 
 usage() { sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "$0"; }
 

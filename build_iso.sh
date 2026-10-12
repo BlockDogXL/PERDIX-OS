@@ -105,6 +105,15 @@ lib32-gamemode
 mangohud
 lib32-mangohud
 cpupower
+# --- Office and drawing (desktop tiles, My Files): LibreOffice, Calibri/Cambria-compatible
+#     fonts, Krita; wmctrl brings their windows back to the front ---
+libreoffice-fresh
+libreoffice-fresh-tr
+hunspell-en_us
+ttf-carlito
+ttf-caladea
+krita
+wmctrl
 # --- System: network (NetworkManager + nmcli, Wi-Fi via wpa_supplicant), audio, power
 #     permissions, antivirus, boot splash ---
 networkmanager
@@ -234,7 +243,8 @@ for file in usr/local/bin/perdix-tune \
             etc/modules-load.d/perdix-uinput.conf \
             etc/tmpfiles.d/perdix.conf \
             etc/sysusers.d/perdix.conf \
-            etc/systemd/system/perdix-restore.service; do
+            etc/systemd/system/perdix-restore.service \
+            usr/lib/libreoffice/share/registry/perdix.xcd; do
     install -D -m 644 -- "$REPO_DIR/rootfs/$file" "$AIROOTFS/$file"
 done
 ln -sf /etc/systemd/system/perdix-restore.service \

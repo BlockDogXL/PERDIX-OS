@@ -4,7 +4,7 @@
 set -euo pipefail
 source "$(dirname "$0")/../lib/common.sh"
 
-# TODO: pacman_install_list shell
+# TODO: pacman_install_list shell; pacman_install_list office
 # TODO: rsync shell/kiosk_shell to /opt/kiosk-shell/
 # TODO: install_rootfs_file usr/local/bin/kiosk-session 0755
 # TODO: install_rootfs_file etc/kiosk/kiosk.conf

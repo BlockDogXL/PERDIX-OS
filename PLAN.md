@@ -115,8 +115,10 @@ UEFI
 2. Shell features, in build order (`[x]` = in `kiosk_shell/main_desktop.py`):
    1. [x] Full-screen frameless window that ignores close requests (Alt+F4, WM close,
       Ctrl+C) and re-enters full screen if minimised. Black + neon-blue theme, animated logo.
-   2. [x] Home screen tiles: **Open Games (Steam)**, **My Files** (read-only browser locked
-      to the home folder), **Antivirus Scan** (ClamAV `clamscan` on the home folder;
+   2. [x] Home screen tiles: **Open Games (Steam)**, **My Files** (browser locked to the home
+      folder; double-clicking a document opens it in LibreOffice or Krita), **Office**
+      (LibreOffice: opens and saves .docx/.xlsx/.pptx and OpenDocument in their own format),
+      **Drawing** (Krita), **Antivirus Scan** (ClamAV `clamscan` on the home folder;
       `clamav-freshclam.service` keeps definitions current), **Shut Down System**
       (confirm dialog with Shut Down / Restart / Cancel).
    3. [x] Launcher service: start Steam (`KIOSK_STEAM_CMD`, default `steam -gamepadui`); the

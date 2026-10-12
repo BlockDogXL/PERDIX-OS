@@ -1,9 +1,13 @@
 """PERDIX OS desktop: the full-screen home screen the kiosk boots into.
 
 Black and neon-blue interface with Piri, the PERDIX mascot, glowing in the centre and
-five actions: Open Games (Steam), My Files, Antivirus Scan, Control Center (the PERDIX
-Control Center, perdix_hub.py) and Shut Down System. The Piri icon in the top-left corner
-opens the About System page. The neon colour comes from ~/.config/perdix-os/theme.json.
+seven actions: Open Games (Steam), My Files, Office (LibreOffice), Drawing (Krita), Antivirus
+Scan, Control Center (the PERDIX Control Center, perdix_hub.py) and Shut Down System. The Piri
+icon in the top-left corner opens the About System page. The neon colour comes from
+~/.config/perdix-os/theme.json.
+
+Double-clicking a document in My Files opens it in LibreOffice (.docx, .xlsx, .pptx, OpenDocument,
+...) or Krita (drawings and images), where it can be edited and saved in its own format.
 
 Kiosk behaviour: a frameless full-screen window that ignores close requests
 (Alt+F4, window-manager close, Ctrl+C) and goes back to full screen if it is
@@ -31,6 +35,7 @@ from PyQt5.QtCore import QDateTime, QDir, QEvent, QPointF, QRectF, Qt, QTimer, Q
 from PyQt5.QtGui import (
     QColor,
     QFont,
+    QFontMetrics,
     QImage,
     QKeySequence,
     QLinearGradient,
@@ -61,7 +66,7 @@ from PyQt5.QtWidgets import (
 from kiosk_shell.config import load_config
 from kiosk_shell.services import power
 from kiosk_shell.services.antivirus import ScanResult, VirusScanner
-from kiosk_shell.services import competitor, perflog, system_info, theme
+from kiosk_shell.services import apps, competitor, perflog, system_info, theme
 from kiosk_shell.services.launcher import AppLauncher
 
 DEV_MODE = os.environ.get("KIOSK_DEV") == "1"
@@ -202,6 +207,19 @@ def icon_path(kind: str) -> QPainterPath:
         p.moveTo(-44, -30); p.lineTo(-14, -30); p.lineTo(-6, -20); p.lineTo(44, -20)
         p.lineTo(44, 32); p.lineTo(-44, 32); p.closeSubpath()
         p.moveTo(-44, -8); p.lineTo(44, -8)
+    elif kind == "office":  # document with a table, a chart bar and text lines
+        p.moveTo(-30, -44); p.lineTo(16, -44); p.lineTo(34, -26); p.lineTo(34, 44)
+        p.lineTo(-30, 44); p.closeSubpath()
+        p.moveTo(16, -44); p.lineTo(16, -26); p.lineTo(34, -26)
+        p.addRect(QRectF(-18, -12, 40, 30))
+        p.moveTo(-18, 3); p.lineTo(22, 3)
+        p.moveTo(2, -12); p.lineTo(2, 18)
+        p.moveTo(-18, 30); p.lineTo(22, 30)
+    elif kind == "drawing":  # brush over a stroke
+        p.moveTo(30, -46); p.lineTo(42, -34); p.lineTo(2, 10); p.lineTo(-10, -2); p.closeSubpath()
+        p.moveTo(-10, -2); p.cubicTo(-26, -4, -30, 10, -32, 20); p.cubicTo(-34, 30, -40, 34, -46, 34)
+        p.cubicTo(-30, 42, -6, 34, 2, 10)
+        p.moveTo(-44, 46); p.cubicTo(-10, 40, 14, 48, 44, 40)
     elif kind == "scan":  # shield with a check mark
         p.moveTo(0, -44); p.lineTo(38, -30); p.lineTo(38, 0)
         p.cubicTo(38, 24, 18, 38, 0, 46)
@@ -398,7 +416,7 @@ class NeonButton(QPushButton):
         self._highlight = 0.0
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setFixedSize(px(290), px(200))
+        self.setFixedSize(px(236), px(200))  # seven tiles fit across 1080p and 720p screens
         self._anim = QVariantAnimation(self, duration=180)
         self._anim.valueChanged.connect(self._set_highlight)
 
@@ -475,11 +493,15 @@ class NeonButton(QPushButton):
         painter.restore()
 
         font = QFont(self.font())
-        font.setPixelSize(px(22))
         font.setWeight(QFont.DemiBold)
+        label = QRectF(rect.left(), rect.top() + rect.height() * 0.68, rect.width(), rect.height() * 0.24)
+        size = px(22)
+        font.setPixelSize(size)
+        while size > px(14) and QFontMetrics(font).horizontalAdvance(self.text()) > label.width() - px(16):
+            size -= 1  # long labels shrink to fit the tile instead of being cut off
+            font.setPixelSize(size)
         painter.setFont(font)
         painter.setPen(TEXT if self.isEnabled() else MUTED)
-        label = QRectF(rect.left(), rect.top() + rect.height() * 0.68, rect.width(), rect.height() * 0.24)
         painter.drawText(label, Qt.AlignCenter, self.text())
 
         if self._badge:
@@ -568,13 +590,17 @@ class HomePage(QWidget):
 
         self.steam_button = NeonButton("Open Games (Steam)", "games")
         self.files_button = NeonButton("My Files", "files")
+        self.office_button = NeonButton("Office", "office")
+        self.office_button.setToolTip("LibreOffice: documents, spreadsheets, presentations (Word, Excel, PowerPoint)")
+        self.drawing_button = NeonButton("Drawing", "drawing")
+        self.drawing_button.setToolTip("Krita: digital painting and image editing")
         self.scan_button = NeonButton("Antivirus Scan", "scan")
         self.hub_button = NeonButton("Control Center", "control")
         self.power_button = NeonButton("Shut Down System", "power")
         row = QHBoxLayout()
-        row.setSpacing(px(28))
+        row.setSpacing(px(18))
         row.addStretch(1)
-        for button in (self.steam_button, self.files_button, self.scan_button, self.hub_button, self.power_button):
+        for button in self.tiles():
             row.addWidget(button)
         row.addStretch(1)
         layout.addLayout(row)
@@ -589,6 +615,10 @@ class HomePage(QWidget):
         self._clock_timer.start()
         self._update_clock()
 
+    def tiles(self) -> tuple[NeonButton, ...]:
+        return (self.steam_button, self.files_button, self.office_button, self.drawing_button,
+                self.scan_button, self.hub_button, self.power_button)
+
     def _update_clock(self) -> None:
         now = QDateTime.currentDateTime()
         self.clock.setText(now.toString("HH:mm"))
@@ -601,12 +631,14 @@ class HomePage(QWidget):
 
 
 class FilesPage(QWidget):
-    """Read-only browser for the kiosk user's home folder. Never leaves it, even through symlinks."""
+    """Browser for the kiosk user's home folder. Never leaves it, even through symlinks.
+    Double-clicking (or Enter on) a file calls on_open_file(path) to open it in its app."""
 
-    def __init__(self, on_back, parent: QWidget | None = None) -> None:
+    def __init__(self, on_back, on_open_file=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.root = os.path.realpath(QDir.homePath())
         self._on_back = on_back
+        self._on_open_file = on_open_file
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(px(56), px(40), px(56), px(40))
@@ -656,15 +688,22 @@ class FilesPage(QWidget):
             self.set_dir(os.path.dirname(self.current))
 
     def _open(self, index) -> None:
+        path = self.model.filePath(index)
         if self.model.isDir(index):
-            self.set_dir(self.model.filePath(index))
+            self.set_dir(path)
+        elif not self._inside_home(path):
+            self.info.setText("That file is outside your files.")  # a symlink pointing out of home
+        elif self._on_open_file is not None:
+            self.info.setText(self._on_open_file(path))
 
     def _describe(self, index) -> None:
         if not index.isValid() or self.model.isDir(index):
             self.info.setText("")
             return
         modified = self.model.lastModified(index).toString("d MMM yyyy, HH:mm")
-        self.info.setText(f"{self.model.fileName(index)}  ·  {human_size(self.model.size(index))}  ·  {modified}")
+        app = apps.app_for(self.model.filePath(index))
+        opens = f"  ·  opens in {app.name}" if app else ""
+        self.info.setText(f"{self.model.fileName(index)}  ·  {human_size(self.model.size(index))}  ·  {modified}{opens}")
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -911,9 +950,11 @@ class MainDesktop(Backdrop):
         self.hub.finished.connect(lambda _code: self.home.hub_button.set_badge(""))
         self.hub.failed.connect(lambda message: self.home.show_message(message, error=True))
         self.scanner = VirusScanner(QDir.homePath(), self)
+        self.office = apps.AppRunner(apps.OFFICE, self)
+        self.drawing = apps.AppRunner(apps.DRAWING, self)
 
         self.home = HomePage()
-        self.files = FilesPage(self.show_home)
+        self.files = FilesPage(self.show_home, self.open_file)
         self.scan = ScanPage(self.scanner, self.show_home)
         self.about = AboutPage(self.show_home)
         self.pages = QStackedWidget()
@@ -926,6 +967,12 @@ class MainDesktop(Backdrop):
 
         self.home.steam_button.clicked.connect(self.open_steam)
         self.home.files_button.clicked.connect(lambda: self.pages.setCurrentWidget(self.files))
+        self.home.office_button.clicked.connect(lambda: self.open_app(self.office))
+        self.home.drawing_button.clicked.connect(lambda: self.open_app(self.drawing))
+        for runner, tile in ((self.office, self.home.office_button), (self.drawing, self.home.drawing_button)):
+            runner.started.connect(lambda tile=tile: tile.set_badge("OPEN"))
+            runner.finished.connect(lambda _code, tile=tile: tile.set_badge(""))
+            runner.failed.connect(self._app_failed)
         self.home.scan_button.clicked.connect(lambda: self.pages.setCurrentWidget(self.scan))
         self.home.power_button.clicked.connect(self.overlay.open)
         self.home.hub_button.clicked.connect(self.open_control_center)
@@ -966,6 +1013,26 @@ class MainDesktop(Backdrop):
             return
         package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.hub.start({"PYTHONPATH": package_root})
+
+    # Office and drawing ---------------------------------------------------------------------
+
+    def open_app(self, runner: apps.AppRunner) -> None:
+        message = runner.open()
+        if message:
+            self.home.show_message(message)
+
+    def open_file(self, path: str) -> str:
+        """My Files: open a document in its app. Returns the line My Files shows."""
+        app = apps.app_for(path)
+        if app is None:
+            extension = os.path.splitext(path)[1] or "this kind of"
+            return f"No app opens {extension} files."
+        runner = self.office if app is apps.OFFICE else self.drawing
+        return runner.open(path) or f"{app.name} is not installed."
+
+    def _app_failed(self, message: str) -> None:
+        self.home.show_message(message, error=True)
+        self.files.info.setText(message)
 
     def _steam_finished(self, exit_code: int) -> None:
         try:
