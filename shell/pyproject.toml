@@ -3,7 +3,7 @@ name = "kiosk-shell"
 version = "0.2.0"
 description = "Full-screen desktop shell for PERDIX OS"
 requires-python = ">=3.11"
-dependencies = ["PyQt5>=5.15", "evdev>=1.6"]
+dependencies = ["PyQt5>=5.15", "evdev>=1.6", "numpy", "python-xlib"]
 
 [project.scripts]
 kiosk-shell = "kiosk_shell.main_desktop:main"

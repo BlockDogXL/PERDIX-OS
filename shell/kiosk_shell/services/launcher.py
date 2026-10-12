@@ -23,20 +23,28 @@ class AppLauncher(QObject):
     def is_running(self) -> bool:
         return self._process.state() != QProcess.NotRunning
 
-    def start(self, extra_env: dict[str, str] | None = None) -> None:
-        """Start the program; extra_env is added to its environment (e.g. Competitor Mode's)."""
+    @property
+    def argv(self) -> list[str]:
+        return list(self._argv)
+
+    def start(self, extra_env: dict[str, str] | None = None, argv: list[str] | None = None) -> None:
+        """Start the program; extra_env is added to its environment (e.g. Competitor Mode's).
+        argv replaces the configured command for this start (e.g. Steam wrapped in gamescope)."""
         if self.is_running():
             return
-        if not self._argv:
+        argv = argv or self._argv
+        if not argv:
             self.failed.emit("No command configured.")
             return
         env = QProcessEnvironment.systemEnvironment()
         for key, value in (extra_env or {}).items():
             env.insert(key, value)
         self._process.setProcessEnvironment(env)
-        self._process.start(self._argv[0], self._argv[1:])
+        self._started_argv = argv
+        self._process.start(argv[0], argv[1:])
 
     def _on_error(self, error: QProcess.ProcessError) -> None:
         # A crash still emits finished(); only a failed start needs reporting here.
         if error == QProcess.FailedToStart:
-            self.failed.emit(f"Could not start {self._argv[0]}: {self._process.errorString()}")
+            program = getattr(self, "_started_argv", self._argv)[0]
+            self.failed.emit(f"Could not start {program}: {self._process.errorString()}")

@@ -1,6 +1,6 @@
 """PERDIX Control Center settings, stored as JSON in ~/.config/perdix-os/settings.json.
 
-Sections: "mouse", "crosshair", "zoom", "hud", "network" and "audio". Unknown or broken
+Sections: "mouse", "crosshair", "zoom", "hud", "network", "audio" and "vision". Unknown or broken
 content falls back to defaults instead of stopping the hub from starting.
 """
 

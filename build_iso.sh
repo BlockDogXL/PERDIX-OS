@@ -132,6 +132,10 @@ easyeffects
 calf
 lsp-plugins-lv2
 rtkit
+# PERDIX Vision: games in gamescope (colour LUT, sharpening), python-xlib, numpy
+gamescope
+python-xlib
+python-numpy
 clamav
 plymouth
 EOF

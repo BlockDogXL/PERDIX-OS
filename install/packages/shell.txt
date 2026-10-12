@@ -15,3 +15,8 @@ easyeffects
 calf
 lsp-plugins-lv2
 rtkit
+# Control Center "Vision": games run in gamescope, which applies the colour LUT and the
+# sharpening effect; python-xlib sets gamescope's properties live; numpy builds the LUT.
+gamescope
+python-xlib
+python-numpy

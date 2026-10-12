@@ -128,6 +128,10 @@ UEFI
       kiosk user join networks), [x] sound (Control Center → Audio: PipeWire devices and volume
       through `wpctl`, one-click EasyEffects volume boost / bass boost / mic noise suppression),
       resolution (`xrandr`).
+   5b. [x] PERDIX Vision (Control Center → Vision): TacticalVision-style picture tuning for games.
+      Steam runs inside gamescope; colour (brightness, contrast, vibrance, lift/gamma/gain and an
+      imported .cube LUT) is baked into one 3D LUT set through GAMESCOPE_COLOR_LOOK_G22, sharpening
+      is a CAS ReShade effect (GAMESCOPE_RESHADE_EFFECT); both change live.
    6. [x] Power: `systemctl poweroff/reboot` (allowed by the polkit rule).
    6b. [x] Branding: Piri (neon blue) in the centre, Piri icon top-left opening an
        **About System** page (version from `/etc/perdix-release`, kernel, architecture,

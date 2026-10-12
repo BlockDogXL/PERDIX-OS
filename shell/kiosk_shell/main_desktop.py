@@ -1001,7 +1001,21 @@ class MainDesktop(Backdrop):
             return
         self.home.show_message("Starting Steam…", seconds=20)
         # Competitor Mode (PERDIX Control Center) adds its game environment while it is on.
-        self.steam.start(competitor.game_env())
+        self.steam.start(competitor.game_env(), self.steam_argv())
+
+    def steam_argv(self) -> list[str] | None:
+        """Steam inside gamescope when PERDIX Vision is on (its colour LUT and sharpening apply to
+        every game, and the Control Center can change them live); otherwise None (plain Steam)."""
+        from kiosk_shell.services import hub_settings, vision  # numpy is only needed here
+        if not vision.VisionSettings.from_dict(hub_settings.load().get("vision")).enabled:
+            return None
+        if not vision.gamescope_installed():
+            self.home.show_message("PERDIX Vision needs gamescope; starting Steam without it.", error=True)
+            return None
+        screen = self.screen() or QApplication.primaryScreen()
+        size = screen.size() * screen.devicePixelRatio()
+        package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return vision.gamescope_argv(self.steam.argv, size.width(), size.height(), sys.executable, package_root)
 
     def _steam_started(self) -> None:
         self.home.steam_button.set_badge("RUNNING")
@@ -1037,6 +1051,11 @@ class MainDesktop(Backdrop):
     def _steam_finished(self, exit_code: int) -> None:
         try:
             perflog.collect()  # summarise the session MangoHud just logged into perf.log
+        except OSError:
+            pass
+        try:  # the gamescope session (if any) is over: the Control Center stops sending it changes
+            os.unlink(os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}",
+                                   "perdix", "gamescope-display"))
         except OSError:
             pass
         self.home.steam_button.set_badge("")

@@ -317,4 +317,4 @@ def test_background_refresh_runs_while_visible(page, monkeypatch):
 
 def test_hub_menu():
     from kiosk_shell.perdix_hub import HubWindow
-    assert [m[2] for m in HubWindow.MODULES[4:]] == ["Zero-Ping", "Network Settings", "Kılavuz", "Audio"]
+    assert [m[2] for m in HubWindow.MODULES[4:7]] == ["Zero-Ping", "Network Settings", "Kılavuz"]

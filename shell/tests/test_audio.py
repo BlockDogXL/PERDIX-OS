@@ -276,9 +276,9 @@ def test_apply_saved_audio_effects(monkeypatch):
     assert applied == [audio.Effects(noise_suppression=True)]
 
 
-def test_eight_modules_fit_the_minimum_window():
+def test_all_modules_fit_the_minimum_window():
     from kiosk_shell.perdix_hub import HubWindow
-    assert HubWindow.MODULES[-1] == ("08", "audio", "Audio", "Volume · EasyEffects")
+    assert ("08", "audio", "Audio", "Volume · EasyEffects") in HubWindow.MODULES
     window = HubWindow()
     window.resize(window.minimumSize())
     window.show()

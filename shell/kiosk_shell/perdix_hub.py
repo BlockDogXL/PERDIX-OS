@@ -15,6 +15,8 @@ accents, 4 px corners). A vertical menu on the left switches the module shown on
                        "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
   08 Audio             PipeWire output/microphone device and volume (wpctl); one-click EasyEffects
                        effects: volume boost, bass boost, microphone noise suppression
+  09 Vision            PERDIX Vision: brightness, contrast, vibrance, sharpening, shadow boost
+                       (lift/gamma/gain) and .cube 3D LUTs for every game, applied live by gamescope
 
 Root-level changes (CPU governor, sysctl, tc, hardening) go through
 `pkexec /usr/local/bin/perdix-tune`.
@@ -44,7 +46,8 @@ if __package__ in (None, ""):  # run as a plain script: make the kiosk_shell pac
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt5.QtCore import QDateTime, QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QBitmap, QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen
+from PyQt5.QtGui import (QBitmap, QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
+                         QPixmap)
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -52,6 +55,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -59,6 +63,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -75,7 +80,7 @@ from PyQt5.QtWidgets import (
 
 from kiosk_shell import __version__, paths
 from kiosk_shell.services import (audio, competitor, hub_settings, hud, keywatch, kilavuz, macros, magnifier,
-                                  mouse, network, perflog, theme, tuning)
+                                  mouse, network, perflog, theme, tuning, vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -373,6 +378,10 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50, 80)
         p.addEllipse(QPointF(0, 26), 5, 5)
         p.moveTo(-44, 40); p.lineTo(44, 40)
+    elif kind == "vision":  # eye with a crosshair pupil
+        p.moveTo(-46, 0); p.cubicTo(-22, -34, 22, -34, 46, 0); p.cubicTo(22, 34, -22, 34, -46, 0)
+        p.addEllipse(QPointF(0, 0), 14, 14)
+        p.moveTo(0, -24); p.lineTo(0, -16); p.moveTo(0, 16); p.lineTo(0, 24)
     elif kind == "audio":  # speaker with sound waves
         p.moveTo(-40, -14); p.lineTo(-22, -14); p.lineTo(0, -34); p.lineTo(0, 34); p.lineTo(-22, 14)
         p.lineTo(-40, 14); p.closeSubpath()
@@ -506,7 +515,7 @@ class NavButton(QPushButton):
         self.index, self.icon, self.title, self.subtitle = index, icon, title, subtitle
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(62)  # eight modules fit the 720 px minimum window height
+        self.setFixedHeight(54)  # nine modules fit the 720 px minimum window height
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def enterEvent(self, event) -> None:
@@ -544,12 +553,13 @@ class NavButton(QPushButton):
         title.setLetterSpacing(QFont.AbsoluteSpacing, 1.5)
         p.setFont(title)
         p.setPen(qcolor(ORANGE if active else TEXT))
-        p.drawText(QRectF(88, 14, self.width() - 96, 20), Qt.AlignLeft | Qt.AlignVCenter, self.title.upper())
+        top = (self.height() - 38) / 2  # title and subtitle centred as a block
+        p.drawText(QRectF(88, top, self.width() - 96, 20), Qt.AlignLeft | Qt.AlignVCenter, self.title.upper())
         sub = QFont(self.font())
         sub.setPixelSize(12)
         p.setFont(sub)
         p.setPen(qcolor(MUTED))
-        p.drawText(QRectF(88, 34, self.width() - 96, 18), Qt.AlignLeft | Qt.AlignVCenter, self.subtitle)
+        p.drawText(QRectF(88, top + 20, self.width() - 96, 18), Qt.AlignLeft | Qt.AlignVCenter, self.subtitle)
 
 
 class Sidebar(QWidget):
@@ -2460,6 +2470,290 @@ class AudioPage(QWidget):
             self._worker.wait()
 
 
+# --- 09 PERDIX Vision -------------------------------------------------------------------------------
+
+
+def vision_test_scene(width: int = 240, height: int = 135):
+    """A synthetic game-like frame for the preview: a dark corridor with a figure in the shadows,
+    a bright window, coloured signs, and grey and hue ramps along the bottom. Values 0-1."""
+    import numpy as np
+    y, x = np.mgrid[0:height, 0:width] / np.array([height, width])[:, None, None]
+    scene = np.zeros((height, width, 3))
+    depth = 0.04 + 0.10 * (1 - np.abs(x - 0.5) * 2) * (1 - y)  # dim corridor, darker at the sides
+    scene[:] = depth[..., None] * np.array([0.8, 0.85, 1.0])
+    window = (x > 0.70) & (x < 0.86) & (y > 0.10) & (y < 0.42)
+    scene[window] = [0.95, 0.92, 0.85]
+    figure = ((x - 0.33) ** 2 / 0.0025 + (y - 0.44) ** 2 / 0.03) < 1  # someone hiding in the dark
+    scene[figure] = [0.07, 0.055, 0.05]
+    scene[(x > 0.10) & (x < 0.20) & (y > 0.18) & (y < 0.26)] = [0.75, 0.10, 0.08]  # red sign
+    scene[(x > 0.50) & (x < 0.58) & (y > 0.30) & (y < 0.36)] = [0.10, 0.55, 0.30]  # green light
+    ramp = y > 0.78
+    scene[ramp & (y < 0.89)] = np.repeat(x[ramp & (y < 0.89)][:, None], 3, axis=1)
+    hue = x[y >= 0.89] * 6
+    scene[y >= 0.89] = np.clip(np.stack([np.abs(hue - 3) - 1, 2 - np.abs(hue - 2), 2 - np.abs(hue - 4)], -1), 0, 1)
+    return scene
+
+
+class VisionPreview(QLabel):
+    """The whole test scene before (left) and after (right), computed with the same colour pipeline
+    that builds gamescope's LUT."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(320, 180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setAlignment(Qt.AlignCenter)
+        self._scene = vision_test_scene()
+        self._image = None
+
+    def update_preview(self, settings: vision.VisionSettings, lut) -> None:
+        import numpy as np
+        after = vision.transform(self._scene, settings, lut) if settings.enabled else self._scene
+        frame = np.concatenate([self._scene, after], axis=1)
+        data = np.ascontiguousarray((np.clip(frame, 0, 1) * 255).astype(np.uint8))
+        self._image = QImage(data.data, data.shape[1], data.shape[0], data.strides[0], QImage.Format_RGB888).copy()
+        self._render()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._render()
+
+    def _render(self) -> None:
+        if self._image is None:
+            return
+        pixmap = QPixmap.fromImage(self._image).scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        p = QPainter(pixmap)
+        p.setPen(QPen(qcolor(ORANGE), 2))
+        p.drawLine(pixmap.width() // 2, 0, pixmap.width() // 2, pixmap.height())
+        p.setPen(qcolor(TEXT))
+        font = QFont(self.font())
+        font.setPixelSize(11)
+        font.setWeight(QFont.Bold)
+        p.setFont(font)
+        p.drawText(8, 16, "BEFORE")
+        p.drawText(pixmap.width() // 2 + 8, 16, "AFTER")
+        p.end()
+        self.setPixmap(pixmap)
+
+
+class VisionPage(QWidget):
+    """PERDIX Vision: TacticalVision-style picture tuning applied to games by gamescope."""
+
+    SLIDERS = (
+        ("brightness", "Brightness", "basic"), ("contrast", "Contrast", "basic"),
+        ("vibrance", "Saturation (vibrance)", "basic"), ("sharpening", "Sharpening", "basic"),
+        ("lift", "Lift (shadow floor)", "shadow"), ("gamma", "Gamma (mid-tones)", "shadow"),
+        ("gain", "Gain (highlights)", "shadow"),
+    )
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self.settings = vision.VisionSettings.from_dict(hub_settings.load().get("vision"))
+        self._lut_cache: tuple[str, object] | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader("09", "Vision", "PERDIX Vision",
+                                    "Picture tuning for every game: colour through a gamescope 3D LUT, sharpening "
+                                    "through gamescope's ReShade. Changes apply live while a game runs."))
+
+        top = Card()
+        row = QHBoxLayout()
+        self.enabled = QCheckBox("Vision on: games run in gamescope", cursor=Qt.PointingHandCursor)
+        self.enabled.setChecked(self.settings.enabled)
+        self.enabled.toggled.connect(self.changed)
+        row.addWidget(self.enabled)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        row.addWidget(self.status, 1)
+        self.reset_button = button("Reset to neutral")
+        self.reset_button.clicked.connect(self.reset)
+        row.addWidget(self.reset_button)
+        top.body.addLayout(row)
+        layout.addWidget(top)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        layout.addLayout(columns, 1)
+        left = QVBoxLayout()
+        left.setSpacing(16)
+        basic, shadow = Card("Basic settings"), Card("Shadow boost  //  lift · gamma · gain")
+        self.sliders: dict[str, LabeledSlider] = {}
+        for key, label, card in self.SLIDERS:
+            low, high = vision.VisionSettings.RANGES[key]
+            fmt = (lambda v: f"{v} %") if key == "sharpening" else (lambda v: f"{v:+d}")
+            slider = LabeledSlider(label, low, high, getattr(self.settings, key), fmt)
+            slider.valueChanged.connect(self.changed)
+            self.sliders[key] = slider
+            (basic if card == "basic" else shadow).body.addWidget(slider)
+        shadow.body.addWidget(QLabel("Lift raises the darkest areas, gamma opens up the mid-tones, gain sets "
+                                     "the highlights: enemies in shadows become visible.", objectName="Muted",
+                                     wordWrap=True))
+        left.addWidget(basic)
+        left.addWidget(shadow)
+        left.addStretch(1)
+        columns.addLayout(left, 5)
+
+        right = QVBoxLayout()
+        right.setSpacing(16)
+        preview_card = Card("Preview")
+        self.preview = VisionPreview()
+        preview_card.body.addWidget(self.preview, 1)
+        right.addWidget(preview_card, 3)
+        lut_card = Card("3D LUT  //  .cube colour profiles")
+        lut_row = QHBoxLayout()
+        self.lut_list = QListWidget()
+        self.lut_list.setMaximumHeight(120)
+        self.lut_list.currentRowChanged.connect(self.lut_selected)
+        lut_row.addWidget(self.lut_list, 1)
+        lut_buttons = QVBoxLayout()
+        self.import_button = button("Import .cube…")
+        self.import_button.clicked.connect(self.import_clicked)
+        self.remove_button = button("Remove")
+        self.remove_button.clicked.connect(self.remove_clicked)
+        lut_buttons.addWidget(self.import_button)
+        lut_buttons.addWidget(self.remove_button)
+        lut_buttons.addStretch(1)
+        lut_row.addLayout(lut_buttons)
+        lut_card.body.addLayout(lut_row)
+        self.strength = LabeledSlider("LUT strength", 0, 100, self.settings.lut_strength, lambda v: f"{v} %")
+        self.strength.valueChanged.connect(self.changed)
+        lut_card.body.addWidget(self.strength)
+        right.addWidget(lut_card, 2)
+        columns.addLayout(right, 6)
+
+        # Slider moves update the preview at once and reach gamescope a moment after they stop.
+        self._apply_timer = QTimer(self, singleShot=True, interval=250, timeout=self.apply)
+        self.refresh_luts()
+        self.update_preview()
+        self.show_status()
+
+    # --- state ---
+
+    def current(self) -> vision.VisionSettings:
+        item = self.lut_list.currentItem()
+        lut = item.data(Qt.UserRole) if item is not None else ""
+        values = {key: slider.value() for key, slider in self.sliders.items()}
+        return vision.VisionSettings(enabled=self.enabled.isChecked(), lut=lut or "",
+                                     lut_strength=self.strength.value(), **values)
+
+    def lut(self, name: str):
+        if not name:
+            return None
+        if self._lut_cache is None or self._lut_cache[0] != name:
+            try:
+                self._lut_cache = (name, vision.load_lut(name))
+            except vision.VisionError:
+                self._lut_cache = (name, None)
+        return self._lut_cache[1]
+
+    def refresh_luts(self, select: str | None = None) -> None:
+        select = self.settings.lut if select is None else select
+        self.lut_list.blockSignals(True)
+        self.lut_list.clear()
+        none = QListWidgetItem("None")
+        none.setData(Qt.UserRole, "")
+        self.lut_list.addItem(none)
+        for name in vision.list_luts():
+            item = QListWidgetItem(name[:-5])
+            item.setData(Qt.UserRole, name)
+            self.lut_list.addItem(item)
+            if name == select:
+                self.lut_list.setCurrentItem(item)
+        if self.lut_list.currentItem() is None:
+            self.lut_list.setCurrentRow(0)
+        self.lut_list.blockSignals(False)
+        self.remove_button.setEnabled(self.lut_list.currentRow() > 0)
+
+    def changed(self, *_args) -> None:
+        self.settings = self.current()
+        self.update_preview()
+        self._apply_timer.start()
+
+    def update_preview(self) -> None:
+        self.preview.update_preview(self.settings, self.lut(self.settings.lut))
+
+    def lut_selected(self, row: int) -> None:
+        self.remove_button.setEnabled(row > 0)
+        self.changed()
+
+    def reset(self) -> None:
+        for slider in self.sliders.values():
+            slider.slider.setValue(0)
+        self.strength.slider.setValue(100)
+        self.lut_list.setCurrentRow(0)
+
+    def show_status(self, message: str = "", ok: bool = True) -> None:
+        if message:
+            set_status(self.status, message, ok)
+        elif not vision.gamescope_installed():
+            set_status(self.status, "gamescope is not installed.", False)
+        elif vision.session_display():
+            set_status(self.status, "Games are running in gamescope: changes apply live.", True)
+        elif self.settings.enabled:
+            set_status(self.status, "Applied to games as soon as you open Steam.", True)
+        else:
+            set_status(self.status, "Off: games run without gamescope.", True)
+
+    # --- apply ---
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def apply(self) -> None:
+        if self.busy():
+            self._apply_timer.start()  # try again when the current run is done
+            return
+        settings = self.settings
+        hub_settings.save_section("vision", settings.to_dict())
+        self._worker = Worker(lambda: vision.apply(settings), self)
+        self._worker.done.connect(self._applied)
+        self._worker.start()
+
+    def _applied(self, result) -> None:
+        if isinstance(result, Exception):
+            self.show_status(str(result), False)
+        else:
+            self.show_status(result, True)
+
+    # --- LUT library ---
+
+    def choose_file(self) -> str:
+        path, _filter = QFileDialog.getOpenFileName(self, "Import a 3D LUT", os.path.expanduser("~"),
+                                                    "3D LUT (*.cube *.CUBE)")
+        return path
+
+    def import_clicked(self) -> None:
+        path = self.choose_file()
+        if not path:
+            return
+        try:
+            name = vision.import_lut(path)
+        except vision.VisionError as error:
+            self.show_status(str(error), False)
+            return
+        self.refresh_luts(select=name)
+        self.changed()
+        self.show_status(f"Imported {name[:-5]}.", True)
+
+    def remove_clicked(self) -> None:
+        item = self.lut_list.currentItem()
+        name = item.data(Qt.UserRole) if item is not None else ""
+        if not name:
+            return
+        vision.delete_lut(name)
+        self.refresh_luts(select="")
+        self.changed()
+        self.show_status(f"Removed {name[:-5]}.", True)
+
+    def shutdown(self) -> None:
+        if self._apply_timer.isActive():
+            self._apply_timer.stop()
+            self.apply()
+        if self.busy():
+            self._worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -2713,6 +3007,7 @@ class HubWindow(QWidget):
         ("06", "wifi", "Network Settings", "Wi-Fi · Ethernet"),
         ("07", "shield", "Kılavuz", "Güvenlik · port · izin"),
         ("08", "audio", "Audio", "Volume · EasyEffects"),
+        ("09", "vision", "Vision", "Colour · sharpening · LUT"),
     ]
 
     def __init__(self) -> None:
@@ -2732,15 +3027,21 @@ class HubWindow(QWidget):
         self.sidebar = Sidebar(self.MODULES)
         middle.addWidget(self.sidebar)
         self.pages = QStackedWidget()
+        self.pages.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
         self.sens, self.scope, self.macro = SensPage(), ScopePage(), MacroPage()
         self.hud, self.network, self.wifi, self.security = HudPage(), NetworkPage(), WifiPage(), SecurityPage()
-        self.audio = AudioPage()
-        for page in (self.sens, self.scope, self.macro, self.hud, self.network, self.wifi, self.security, self.audio):
+        self.audio, self.vision = AudioPage(), VisionPage()
+        for page in (self.sens, self.scope, self.macro, self.hud, self.network, self.wifi, self.security, self.audio,
+                     self.vision):
             holder = QWidget()
             holder_layout = QVBoxLayout(holder)
             holder_layout.setContentsMargins(32, 26, 32, 26)
             holder_layout.addWidget(page)
-            self.pages.addWidget(holder)
+            # A page taller than a small window scrolls instead of squeezing its controls together.
+            scroll = QScrollArea(widgetResizable=True, frameShape=QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setWidget(holder)
+            self.pages.addWidget(scroll)
         middle.addWidget(self.pages, 1)
         outer.addLayout(middle, 1)
         self.status_bar = StatusBar()
@@ -2757,6 +3058,7 @@ class HubWindow(QWidget):
             self.macro.runner.wait(2000)
         self.wifi.shutdown()
         self.audio.shutdown()
+        self.vision.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

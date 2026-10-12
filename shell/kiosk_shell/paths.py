@@ -10,7 +10,11 @@ Logs (/var/log/perdix, created by /etc/tmpfiles.d/perdix.conf):
 User (~/.config/perdix-os):
   theme.json                     neon orange / blue accent colours of the desktop and Control Center
   cursor.conf                    cursor theme and size (read by .xinitrc at login)
-  settings.json                  Control Center settings (mouse curve, crosshair, zoom, HUD, network)
+  settings.json                  Control Center settings (mouse curve, crosshair, zoom, HUD, network,
+                                 audio effects, PERDIX Vision)
+  vision/luts/                   3D LUTs (.cube) imported in PERDIX Vision
+Generated for gamescope (PERDIX Vision): ~/.local/state/perdix/vision/perdix-vision.cube and
+~/.local/share/gamescope/reshade/Shaders/perdix_cas_*.fx
   macros.json                    Macro Studio macros
   competitor.json, competitor.env  Competitor Mode state and the game environment it sets
 """
