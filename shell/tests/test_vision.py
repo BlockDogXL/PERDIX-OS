@@ -358,16 +358,9 @@ def test_page_reset(page):
     assert page.current() == S(enabled=page.enabled.isChecked())
 
 
-def test_nine_modules_fit_the_minimum_window():
-    from kiosk_shell.perdix_hub import HubWindow
-    assert HubWindow.MODULES[-1] == ("09", "vision", "Vision", "Colour · sharpening · LUT")
-    window = HubWindow()
-    window.resize(window.minimumSize())
-    window.show()
-    app.processEvents()
-    last = window.sidebar.buttons[-1]
-    assert last.mapTo(window.sidebar, last.rect().bottomLeft()).y() <= window.sidebar.height() - 54
-    window.close()
+def test_vision_is_in_the_menu():
+    from kiosk_shell.perdix_hub import NAV
+    assert ("vision", "vision", "Vision", "Colour · sharpening · LUT", "Gaming") in NAV
 
 
 def test_shader_resource_is_packaged():

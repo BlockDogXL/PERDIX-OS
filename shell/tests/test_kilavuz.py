@@ -232,4 +232,4 @@ def test_scan_error_is_shown(page, monkeypatch):
 
 def test_hub_has_the_kilavuz_module():
     from kiosk_shell.perdix_hub import HubWindow
-    assert ("07", "shield", "Kılavuz", "Güvenlik · port · izin") in HubWindow.MODULES
+    assert any(m[1:] == ("shield", "Kılavuz", "Güvenlik · port · izin") for m in HubWindow.MODULES)

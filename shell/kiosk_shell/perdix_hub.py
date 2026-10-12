@@ -341,6 +341,29 @@ class PageHeader(QWidget):
             p.fillPath(stripe, qcolor(ORANGE, 0.55 if i % 2 else 0.25))
 
 
+# --- Modules ---------------------------------------------------------------------------------------
+
+# The menu, in order: (key, icon, title, subtitle, group). A module's number is its position, so
+# adding a module renumbers the ones after it automatically. The key is also the HubWindow
+# attribute that holds the page.
+NAV = [
+    ("sens", "mouse", "Sens & Accel", "Acceleration · eDPI · cm/360", "Gaming"),
+    ("scope", "scope", "Tactical Scope", "Crosshair designer · overlay", "Gaming"),
+    ("macro", "macro", "Macro Studio", "Key, text and delay chains", "Gaming"),
+    ("hud", "hud", "Game Mode & HUD", "Competitor · PERDIX HUD", "Gaming"),
+    ("vision", "vision", "Vision", "Colour · sharpening · LUT", "Gaming"),
+    ("network", "net", "Zero-Ping", "BBR · QoS · game priority", "Network & Sound"),
+    ("wifi", "wifi", "Network Settings", "Wi-Fi · Ethernet", "Network & Sound"),
+    ("audio", "audio", "Audio", "Volume · EasyEffects", "Network & Sound"),
+    ("security", "shield", "Kılavuz", "Güvenlik · port · izin", "Maintenance"),
+]
+
+
+def module_number(key: str) -> str:
+    """'05' for the fifth entry of NAV."""
+    return f"{[entry[0] for entry in NAV].index(key) + 1:02d}"
+
+
 # --- Icons ----------------------------------------------------------------------------------------
 
 
@@ -515,7 +538,7 @@ class NavButton(QPushButton):
         self.index, self.icon, self.title, self.subtitle = index, icon, title, subtitle
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(54)  # nine modules fit the 720 px minimum window height
+        self.setFixedHeight(56)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def enterEvent(self, event) -> None:
@@ -563,26 +586,48 @@ class NavButton(QPushButton):
 
 
 class Sidebar(QWidget):
-    def __init__(self, entries: list[tuple[str, str, str, str]], parent=None) -> None:
+    """The module menu: group headings and entries, scrolling when the window is too short."""
+
+    def __init__(self, entries: list[tuple[str, str, str, str, str]], parent=None) -> None:
         super().__init__(parent)
         self.setFixedWidth(272)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 22, 0, 18)
         layout.setSpacing(4)
         heading = tracked_label("Navigation", "Muted", 3)
-        heading.setContentsMargins(18, 0, 0, 10)
+        heading.setContentsMargins(18, 0, 0, 6)
         layout.addWidget(heading)
+
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(2)
         self.group = QButtonGroup(self)
         self.buttons = []
-        for i, entry in enumerate(entries):
-            b = NavButton(*entry)
+        self.headings = []
+        last_group = None
+        for i, (_key, icon, title, subtitle, group) in enumerate(entries):
+            if group != last_group:
+                label = tracked_label(group, "EyebrowOrange", 2)
+                label.setContentsMargins(18, 10 if last_group else 2, 0, 4)
+                inner_layout.addWidget(label)
+                self.headings.append(label)
+                last_group = group
+            b = NavButton(f"{i + 1:02d}", icon, title, subtitle)
             self.group.addButton(b, i)
             self.buttons.append(b)
-            layout.addWidget(b)
-        layout.addStretch(1)
+            inner_layout.addWidget(b)
+        inner_layout.addStretch(1)
+        self.scroll = QScrollArea(widgetResizable=True, frameShape=QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        self.scroll.setWidget(inner)
+        layout.addWidget(self.scroll, 1)
+        layout.addSpacing(30)  # room for the hazard stripes
         footer = tracked_label("PERDIX OS  //  Esports", "Muted", 2)
         footer.setContentsMargins(18, 0, 0, 0)
         layout.addWidget(footer)
+        self.group.idClicked.connect(lambda i: self.scroll.ensureWidgetVisible(self.buttons[i]))
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
@@ -732,7 +777,7 @@ class SensPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
-        layout.addWidget(PageHeader("01", "Input", "Sens & Accel",
+        layout.addWidget(PageHeader(module_number("sens"), "Input", "Sens & Accel",
                                     "Raw Accel-style curves on libinput: pick a curve, set the amount, "
                                     "and it is applied to your mouse as you change it."))
         columns = QHBoxLayout()
@@ -1176,7 +1221,7 @@ class ScopePage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
-        layout.addWidget(PageHeader("02", "Optics", "Tactical Scope",
+        layout.addWidget(PageHeader(module_number("scope"), "Optics", "Tactical Scope",
                                     "Design your crosshair and pin it to the centre of the screen, and set "
                                     "a zoom key. Many games and leagues ban overlays and zoom tools in "
                                     "ranked play: check the rules first."))
@@ -1302,7 +1347,7 @@ class MacroPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
-        layout.addWidget(PageHeader("03", "Automation", "Macro Studio",
+        layout.addWidget(PageHeader(module_number("macro"), "Automation", "Macro Studio",
                                     "Chain key combos, typed text and delays. Runs on a virtual keyboard "
                                     "after a 3-second countdown, so you can switch to the target window."))
         columns = QHBoxLayout()
@@ -1670,7 +1715,7 @@ class HudPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
-        layout.addWidget(PageHeader("04", "Performance", "Game Mode & HUD",
+        layout.addWidget(PageHeader(module_number("hud"), "Performance", "Game Mode & HUD",
                                     "One switch for maximum frame rate, and the PERDIX HUD: MangoHud "
                                     "styled in PERDIX colours, updated the moment you click."))
 
@@ -1863,7 +1908,7 @@ class NetworkPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
-        layout.addWidget(PageHeader("05", "Network", "Network Optimization (Zero-Ping)",
+        layout.addWidget(PageHeader(module_number("network"), "Network", "Network Optimization (Zero-Ping)",
                                     "Google BBR congestion control and a traffic-control (tc) policy that "
                                     "puts game UDP first and holds background downloads back."))
 
@@ -2012,7 +2057,7 @@ class WifiPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
-        layout.addWidget(PageHeader("06", "Network", "Network & Wi-Fi Settings",
+        layout.addWidget(PageHeader(module_number("wifi"), "Network", "Network & Wi-Fi Settings",
                                     "Wi-Fi and Ethernet through NetworkManager. A network cable works the moment "
                                     "it is plugged in; for Wi-Fi, pick a network and enter its password."))
 
@@ -2296,7 +2341,7 @@ class AudioPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
-        layout.addWidget(PageHeader("08", "Audio", "Audio & Effects",
+        layout.addWidget(PageHeader(module_number("audio"), "Audio", "Audio & Effects",
                                     "PipeWire sound, plus one-click EasyEffects: louder volume, deeper bass and "
                                     "a microphone without background noise."))
 
@@ -2554,7 +2599,7 @@ class VisionPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
-        layout.addWidget(PageHeader("09", "Vision", "PERDIX Vision",
+        layout.addWidget(PageHeader(module_number("vision"), "Vision", "PERDIX Vision",
                                     "Picture tuning for every game: colour through a gamescope 3D LUT, sharpening "
                                     "through gamescope's ReShade. Changes apply live while a game runs."))
 
@@ -2780,7 +2825,7 @@ class SecurityPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
         layout.addWidget(PageHeader(
-            "07", turkish_upper("Güvenlik"), turkish_upper("PERDIX Kılavuz"),
+            module_number("security"), turkish_upper("Güvenlik"), turkish_upper("PERDIX Kılavuz"),
             "Açık portları ve zayıf dosya izinlerini denetler. Güvenle düzeltilebilenler "
             "\"Açıkları Kapat\" ile tek tuşla kapatılır; geri kalanlar ne yapmanız gerektiğiyle "
             "birlikte listelenir.",
@@ -2998,17 +3043,11 @@ class SecurityPage(QWidget):
 
 
 class HubWindow(QWidget):
-    MODULES = [
-        ("01", "mouse", "Sens & Accel", "Acceleration · eDPI · cm/360"),
-        ("02", "scope", "Tactical Scope", "Crosshair designer · overlay"),
-        ("03", "macro", "Macro Studio", "Key, text and delay chains"),
-        ("04", "hud", "Game Mode & HUD", "Competitor · PERDIX HUD"),
-        ("05", "net", "Zero-Ping", "BBR · QoS · game priority"),
-        ("06", "wifi", "Network Settings", "Wi-Fi · Ethernet"),
-        ("07", "shield", "Kılavuz", "Güvenlik · port · izin"),
-        ("08", "audio", "Audio", "Volume · EasyEffects"),
-        ("09", "vision", "Vision", "Colour · sharpening · LUT"),
-    ]
+    # (number, icon, title, subtitle) per menu entry, derived from NAV.
+    MODULES = [(f"{i + 1:02d}", icon, title, subtitle) for i, (_k, icon, title, subtitle, _g) in enumerate(NAV)]
+    PAGES = {"sens": "SensPage", "scope": "ScopePage", "macro": "MacroPage", "hud": "HudPage",
+             "vision": "VisionPage", "network": "NetworkPage", "wifi": "WifiPage", "audio": "AudioPage",
+             "security": "SecurityPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -3024,15 +3063,13 @@ class HubWindow(QWidget):
 
         middle = QHBoxLayout()
         middle.setSpacing(0)
-        self.sidebar = Sidebar(self.MODULES)
+        self.sidebar = Sidebar(NAV)
         middle.addWidget(self.sidebar)
         self.pages = QStackedWidget()
         self.pages.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
-        self.sens, self.scope, self.macro = SensPage(), ScopePage(), MacroPage()
-        self.hud, self.network, self.wifi, self.security = HudPage(), NetworkPage(), WifiPage(), SecurityPage()
-        self.audio, self.vision = AudioPage(), VisionPage()
-        for page in (self.sens, self.scope, self.macro, self.hud, self.network, self.wifi, self.security, self.audio,
-                     self.vision):
+        for key, *_rest in NAV:
+            page = globals()[self.PAGES[key]]()
+            setattr(self, key, page)  # self.sens, self.vision, ...
             holder = QWidget()
             holder_layout = QVBoxLayout(holder)
             holder_layout.setContentsMargins(32, 26, 32, 26)

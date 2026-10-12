@@ -276,17 +276,9 @@ def test_apply_saved_audio_effects(monkeypatch):
     assert applied == [audio.Effects(noise_suppression=True)]
 
 
-def test_all_modules_fit_the_minimum_window():
-    from kiosk_shell.perdix_hub import HubWindow
-    assert ("08", "audio", "Audio", "Volume · EasyEffects") in HubWindow.MODULES
-    window = HubWindow()
-    window.resize(window.minimumSize())
-    window.show()
-    app.processEvents()
-    last = window.sidebar.buttons[-1]
-    bottom = last.mapTo(window.sidebar, last.rect().bottomLeft()).y()
-    assert bottom <= window.sidebar.height() - 54  # above the hazard stripes and the footer
-    window.close()
+def test_audio_is_in_the_menu():
+    from kiosk_shell.perdix_hub import NAV
+    assert ("audio", "audio", "Audio", "Volume · EasyEffects", "Network & Sound") in NAV
 
 
 def test_runtime_dir_default(monkeypatch):

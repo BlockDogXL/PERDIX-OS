@@ -182,6 +182,31 @@ UEFI
    `install/install.sh` in a chroot, so Steam and games persist.
 3. Test the ISO in the VM, then on real AMD/Intel/NVIDIA hardware.
 
+### Phase 8 — System tools (sub-plan; built one item at a time, one commit each)
+
+The Control Center grows from 9 to 20 modules, so first (step 0) its menu gets group headings
+(Gaming · System · Media · Maintenance) and scrolls. Every item below is a module of
+`perdix_hub.py` with its logic in `kiosk_shell/services/`, tests in `shell/tests/`, and anything
+that needs root goes through `perdix-tune` (validated arguments, pkexec, polkit) or a narrow
+polkit rule for a system service. Status: `[ ]` todo, `[x]` done.
+
+| # | Module | How | Packages | Root / limits | Verified by |
+|---|---|---|---|---|---|
+| 1 | [ ] Task Manager | `psutil` for CPU, RAM, per-process use; GPU from amdgpu sysfs (`gpu_busy_percent`, VRAM) or `nvidia-smi`; "Not responding" = the window ignores the EWMH `_NET_WM_PING` (what Windows calls a hung window); End task = SIGTERM, then SIGKILL | python-psutil | own processes only; the desktop shell and system processes are protected | psutil on this machine; ping on a real X server with a responsive and a frozen window |
+| 2 | [ ] Devices | `lspci -k` (driver in use, modules), `lsusb`, `/proc/bus/input/devices` (keyboards, mice), DMI for the motherboard | pciutils, usbutils | none | parsers against real command output |
+| 3 | [ ] System Diagnostics | GPU, driver, Vulkan (`vulkaninfo --summary`), OpenGL (`glxinfo -B`), DirectX = what DXVK / VKD3D-Proton can offer on that Vulkan version (Linux has no native DirectX), RAM, BIOS (DMI), exportable report | vulkan-tools, mesa-utils | none | real tool output where available |
+| 4 | [ ] Region & Language | `timedatectl` (zone, NTP), `localectl` (X11 keyboard layout, system language) + `setxkbmap` for the running session | (systemd) | polkit rule for timedate1/locale1 actions; only generated locales | parsers; commands recorded |
+| 5 | [ ] Bluetooth | `bluetoothctl` (scan, pair, trust, connect, remove); Blueman as the full tool | bluez, bluez-utils, blueman | kiosk user allowed by BlueZ's D-Bus policy / polkit | parser against real bluetoothctl output; no radio here |
+| 6 | [ ] Screen & audio sharing | PERDIX runs Xorg, where Discord/OBS/browsers capture the screen directly; the module checks the pieces (PipeWire, portals) and adds a "stream mix": a PipeWire virtual microphone carrying game audio + mic for Discord | xdg-desktop-portal, -gtk | no root | real PipeWire with virtual devices |
+| 7 | [ ] Camera & microphone test | `v4l2-ctl` (devices, formats/resolutions, controls) + live preview; microphone level meter from PipeWire and gain via `wpctl` | v4l-utils | none | parsers; PipeWire with a virtual mic |
+| 8 | [ ] Game recording | OBS Studio (libobs) running in the background, driven over obs-websocket 5; hardware encoder (VAAPI / NVENC) so the game keeps its FPS; F9 through the existing evdev key watcher | obs-studio | input group already granted | websocket protocol against a test server; real FPS cost needs hardware |
+| 9 | [ ] Lossless video cutter | the LosslessCut approach: `ffmpeg -c copy` cut and concat (no re-encode), with a preview player | ffmpeg | none | real ffmpeg on generated clips |
+| 10 | [ ] Smart updater | `checkupdates` (safe: separate database copy), update through `perdix-tune update` after a snapshot (item 11), neon-orange notification on the desktop | pacman-contrib | perdix-tune | commands recorded; live ISO cannot keep updates |
+| 11 | [ ] Recovery center | Timeshift snapshots: create, list, restore, delete; automatic snapshot before updates | timeshift | perdix-tune | commands recorded; restore needs an installed system |
+
+Network access to archlinux.org is blocked in the development environment, so package names
+that could not be checked against the Arch repositories are listed in each item's commit.
+
 ---
 
 ## 5. Scripts to write
