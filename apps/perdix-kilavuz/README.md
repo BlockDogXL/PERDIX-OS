@@ -1,10 +1,10 @@
 # PERDIX Sentinel (PERDIX Kılavuz): security audit
 
 `perdix_kilavuz.py` checks this machine for **open ports** and **weak file permissions**, then
-prints a Turkish report with a suggested fix for each finding. It is **read-only**: it reads the
-kernel's socket tables (`/proc/net/{tcp,tcp6,udp,udp6}`) and file metadata, never changes
-anything, and never contacts other hosts. No interface is attached yet; it is a plain script and
-a set of functions you can import.
+prints a Turkish report with a suggested fix for each finding. The audit reads the kernel's
+socket tables (`/proc/net/{tcp,tcp6,udp,udp6}`, plus `ss` when installed) and file metadata, and
+never contacts other hosts. It changes nothing unless you ask for hardening with `--apply`. No
+interface is attached yet; it is a plain script and a set of functions you can import.
 
 ## Run
 
@@ -13,6 +13,8 @@ sudo python3 apps/perdix-kilavuz/perdix_kilavuz.py              # full audit, Tu
 python3 apps/perdix-kilavuz/perdix_kilavuz.py --ports-only      # only listening sockets
 python3 apps/perdix-kilavuz/perdix_kilavuz.py --perms-only --paths /etc /opt
 python3 apps/perdix-kilavuz/perdix_kilavuz.py --json            # machine-readable
+python3 apps/perdix-kilavuz/perdix_kilavuz.py --fix             # hardening plan, changes nothing
+sudo python3 apps/perdix-kilavuz/perdix_kilavuz.py --apply      # apply the automatic fixes
 ```
 
 Run it as root for a complete picture. As a normal user, some sockets can't be matched to their
@@ -36,6 +38,26 @@ Sockets bound only to loopback (`127.0.0.1`, `::1`) are not reported. Permission
 under `/etc /usr/local /opt /var/log /home` by default (`--paths` changes this). Symlinks are
 never followed, and `/proc`, `/sys`, `/dev`, `/run` and `/tmp` are not entered from outside.
 
+## Hardening
+
+`--fix` lists, after the report, which findings can be fixed automatically and which need a
+person. `--apply` carries out the automatic ones:
+
+| Finding | Automatic fix |
+|---|---|
+| World-writable file or folder (no sticky bit) | remove write permission for others (`o-w`) |
+| Sensitive file too open | remove only the forbidden bits (e.g. `/etc/shadow` 0666 → 0640) |
+| Sensitive file not owned by root | give it to root, keeping its group |
+| Unexpected SUID/SGID program | none: listed for you to check (removing it can break software) |
+| Network-reachable service | none: listed for you to check (stopping it can cut off SSH or Steam) |
+
+Every fix is made on the exact file that was scanned: the file is opened without following
+symlinks and its device/inode is compared with the scan, so a file swapped for a symlink or
+another file in the meantime is skipped (`atlandı`). Each change is appended to
+`/var/log/perdix/kilavuz.log` as a JSON line with the old and new mode or owner (`--log` changes
+the path), so it can be traced and undone. After `--apply`, the exit code is 1 only if a
+high-severity finding is still open.
+
 ## Use from Python
 
 ```python
@@ -45,6 +67,8 @@ for sock in pk.list_listening_sockets():
     print(sock.label(), sock.process, "exposed" if sock.exposed else "loopback")
 findings = pk.audit_ports() + pk.audit_permissions(["/etc"])
 print(pk.format_report(pk.AuditReport(findings)))
+plan = pk.remediate(findings)                 # what --fix shows; apply=True applies it
+print(pk.format_remediation(plan, applied=False))
 ```
 
 ## Tests
@@ -54,4 +78,4 @@ pytest apps/perdix-kilavuz/tests
 ```
 
 The tests use synthetic `/proc/net` tables, a fake `/proc` and a temporary file tree, so they
-don't depend on the machine they run on.
+don't depend on the machine they run on; hardening is only ever applied inside that tree.

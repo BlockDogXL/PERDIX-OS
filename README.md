@@ -18,8 +18,9 @@ cd shell && python -m kiosk_shell.perdix_hub
 # PERDIX Studio (code editor + modding tools): see apps/perdix-studio/README.md
 python3 apps/perdix-studio/perdix_studio.py
 
-# PERDIX Sentinel / Kılavuz: read-only open-port and file-permission audit (Turkish report)
+# PERDIX Sentinel / Kılavuz: open-port and file-permission audit (Turkish report)
 sudo python3 apps/perdix-kilavuz/perdix_kilavuz.py          # --json, --ports-only, --perms-only
+sudo python3 apps/perdix-kilavuz/perdix_kilavuz.py --fix    # hardening plan; --apply applies it
 
 # Build the live ISO (on an Arch host, needs archiso >= 86 and ~10 GB free):
 sudo pacman -S --needed archiso

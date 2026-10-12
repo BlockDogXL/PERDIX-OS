@@ -376,3 +376,148 @@ def test_mode_constants_make_sense():
     assert not 0o640 & forbidden and 0o644 & forbidden and 0o660 & forbidden
     assert not 0o440 & pk.SENSITIVE_FILES["/etc/sudoers"][0]
     assert stat.S_IMODE(0o104755) == 0o4755
+
+
+# --- hardening (remediation) --------------------------------------------------------------------
+
+needs_root = pytest.mark.skipif(os.geteuid() != 0, reason="chown needs root")
+
+
+def mode_of(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+def test_findings_carry_safe_fixes_only(tree):
+    findings = {
+        Path(f.target).name: f
+        for f in pk.audit_permissions([str(tree)], sensitive={}, host_key_glob="")
+    }
+    assert findings["world_writable.conf"].fix.action == "chmod"
+    assert findings["world_writable.conf"].fix.clear_bits == 0o002
+    assert findings["open_dir"].fix.clear_bits == 0o002
+    assert findings["suid_tool"].fix is None  # SUID removal stays manual
+    assert all(f.fix is None for f in pk.audit_ports(pk.parse_proc_net(TCP, "tcp")))
+
+
+def test_remediate_plan_changes_nothing(tree, tmp_path):
+    findings = pk.audit_permissions([str(tree)], sensitive={}, host_key_glob="")
+    log = tmp_path / "log" / "kilavuz.log"
+    results = pk.remediate(findings, apply=False, log_path=str(log))
+    status = {Path(r.finding.target).name: r.status for r in results}
+    assert status["world_writable.conf"] == pk.PLANNED
+    assert status["suid_tool"] == pk.MANUAL
+    assert mode_of(tree / "world_writable.conf") == 0o666
+    assert not log.exists()
+
+
+def test_remediate_apply(tree, tmp_path):
+    findings = pk.audit_permissions([str(tree)], sensitive={}, host_key_glob="")
+    log = tmp_path / "log" / "kilavuz.log"
+    results = {Path(r.finding.target).name: r for r in pk.remediate(findings, True, str(log))}
+
+    assert results["world_writable.conf"].status == pk.APPLIED
+    assert results["world_writable.conf"].detail == "izinler 0666 → 0664"
+    assert mode_of(tree / "world_writable.conf") == 0o664
+    assert mode_of(tree / "open_dir") == 0o775
+    assert results["suid_tool"].status == pk.MANUAL
+    assert mode_of(tree / "bin" / "suid_tool") == 0o4755  # untouched
+    assert mode_of(tree / "shared") == 0o1777  # never flagged, never touched
+
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    assert {Path(e["path"]).name for e in entries} == {"world_writable.conf", "open_dir"}
+    assert all(e["status"] == pk.APPLIED and e["action"] == "chmod" for e in entries)
+
+    # A second run finds nothing left to fix.
+    again = pk.audit_permissions([str(tree)], sensitive={}, host_key_glob="")
+    assert {Path(f.target).name for f in again} == {"suid_tool", "sgid_tool"}
+
+
+def test_sensitive_file_fix(tmp_path):
+    shadow = make_file(tmp_path / "shadow", 0o666)
+    rules = {str(shadow): pk.SENSITIVE_FILES["/etc/shadow"]}
+    (finding,) = pk.audit_sensitive_files(rules, host_key_glob="")
+    assert pk.apply_fix(finding.fix) == (pk.APPLIED, "izinler 0666 → 0640")
+    assert mode_of(shadow) == 0o640
+    assert pk.apply_fix(finding.fix)[0] == pk.ALREADY_OK
+
+
+@needs_root
+def test_chown_fix(tmp_path):
+    conf = make_file(tmp_path / "perdix.conf", 0o644)
+    os.chown(conf, 1000, 1000)
+    info = os.stat(conf)
+    fix = pk.Fix("chown", str(conf), info.st_dev, info.st_ino, uid=0)
+    assert pk.apply_fix(fix) == (pk.APPLIED, "sahibi uid 1000 → 0")
+    assert os.stat(conf).st_uid == 0 and os.stat(conf).st_gid == 1000  # group kept
+    assert pk.apply_fix(fix)[0] == pk.ALREADY_OK
+
+
+def test_fix_refuses_replaced_file(tmp_path):
+    target = make_file(tmp_path / "target.conf", 0o666)
+    (finding,) = [f for p, i in pk.walk_files([str(target)]) if (f := pk.check_entry(p, i))]
+    # The file is swapped for another one after the scan (e.g. by its owner). The old one is
+    # kept around so the new file can't reuse its inode number.
+    target.rename(tmp_path / "old.conf")
+    make_file(target, 0o666)
+    assert pk.apply_fix(finding.fix)[0] == pk.SKIPPED
+    assert mode_of(target) == 0o666
+
+
+def test_fix_refuses_symlink_swap(tmp_path):
+    victim = make_file(tmp_path / "victim", 0o666)
+    target = make_file(tmp_path / "target.conf", 0o666)
+    (finding,) = [f for p, i in pk.walk_files([str(target)]) if (f := pk.check_entry(p, i))]
+    target.unlink()
+    target.symlink_to(victim)
+    assert pk.apply_fix(finding.fix) == (pk.SKIPPED, "dosya bir sembolik bağlantı; dokunulmadı")
+    assert mode_of(victim) == 0o666
+
+
+def test_fix_missing_file(tmp_path):
+    fix = pk.Fix("chmod", str(tmp_path / "gone"), 0, 0, clear_bits=0o002)
+    assert pk.apply_fix(fix)[0] == pk.SKIPPED
+
+
+def test_format_remediation():
+    finding = pk.Finding("izin", "yüksek", "/etc/x", "açık", "chmod o-w '/etc/x'")
+    port = pk.Finding("port", "yüksek", "tcp 0.0.0.0:23", "Telnet", "servisi durdurun")
+    info = pk.Finding("port", "bilgi", "tcp 0.0.0.0:22", "SSH", "-")
+    plan = pk.format_remediation(
+        [
+            pk.Remediation(finding, pk.PLANNED, "chmod o-w '/etc/x'"),
+            pk.Remediation(port, pk.MANUAL, port.suggestion),
+            pk.Remediation(info, pk.MANUAL, info.suggestion),
+        ],
+        applied=False,
+    )
+    assert "hiçbir şey değişmedi" in plan and "--apply" in plan
+    assert "tcp 0.0.0.0:23: servisi durdurun" in plan
+    assert "tcp 0.0.0.0:22" not in plan  # info-only findings need no action
+    done = pk.format_remediation(
+        [pk.Remediation(finding, pk.APPLIED, "izinler 0666 → 0664")], applied=True
+    )
+    assert "[uygulandı] /etc/x: izinler 0666 → 0664" in done
+
+
+def test_main_fix_is_dry_run(tree, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pk, "audit_sensitive_files", lambda *a, **k: [])
+    log = tmp_path / "kilavuz.log"
+    assert pk.main(["--perms-only", "--fix", "--paths", str(tree), "--log", str(log)]) == 1
+    assert "Sertleştirme planı" in capsys.readouterr().out
+    assert mode_of(tree / "world_writable.conf") == 0o666 and not log.exists()
+
+
+def test_main_apply(tree, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pk, "audit_sensitive_files", lambda *a, **k: [])
+    log = tmp_path / "kilavuz.log"
+    args = ["--perms-only", "--apply", "--json", "--paths", str(tree), "--log", str(log)]
+    assert pk.main(args) == 0  # every high finding fixed; SUID (orta) left for the user
+    data = json.loads(capsys.readouterr().out)
+    statuses = {Path(r["target"]).name: r["status"] for r in data["remediation"]}
+    assert statuses == {
+        "world_writable.conf": pk.APPLIED,
+        "open_dir": pk.APPLIED,
+        "suid_tool": pk.MANUAL,
+        "sgid_tool": pk.MANUAL,
+    }
+    assert mode_of(tree / "world_writable.conf") == 0o664 and log.exists()

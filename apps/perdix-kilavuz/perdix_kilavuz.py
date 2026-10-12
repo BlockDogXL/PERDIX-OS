@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""PERDIX Sentinel (PERDIX Kılavuz): read-only audit of open ports and weak file permissions.
+"""PERDIX Sentinel (PERDIX Kılavuz): audit of open ports and weak file permissions, with hardening.
 
-This module only *looks*: it reads the kernel's socket tables and file metadata on this
-machine and reports findings with a suggested fix. It never changes the system and never
-contacts other hosts. Findings and the report are in Turkish (the PERDIX Kılavuz language);
-code and docstrings are English like the rest of the PERDIX OS repository.
+The audit only *looks*: it reads the kernel's socket tables (and `ss`, when installed) and file
+metadata on this machine and reports findings with a suggested fix. It never contacts other
+hosts. Hardening is opt-in: --fix shows which fixes can be applied automatically, and only
+--apply changes anything. Automatic fixes are limited to tightening permissions (removing
+world-write, tightening sensitive files, giving them back to root); stopping services and
+removing SUID/SGID bits stay manual, because they can break a working system.
+
+Findings and the report are in Turkish (the PERDIX Kılavuz language); code and docstrings are
+English like the rest of the PERDIX OS repository.
 
 Usage:
   python3 perdix_kilavuz.py                 # Turkish report on the terminal
   python3 perdix_kilavuz.py --json          # machine-readable findings
   python3 perdix_kilavuz.py --paths /etc /opt --ports-only / --perms-only
+  python3 perdix_kilavuz.py --fix           # hardening plan (changes nothing)
+  sudo python3 perdix_kilavuz.py --apply    # apply the automatic fixes, log to /var/log/perdix
 Run as root for a complete picture: as a normal user, sockets and files belonging to other
 users can't all be attributed or read (the report says when that happened).
 
@@ -18,11 +25,13 @@ Functions:
   audit_ports()              findings for sockets reachable from the network
   audit_permissions()        findings for world-writable files, SUID/SGID, sensitive files
   run_audit() / format_report()
+  remediate()                plan or apply the automatic fixes for a list of findings
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
 import ipaddress
 import json
 import os
@@ -32,6 +41,7 @@ import stat
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -46,6 +56,19 @@ SEVERITY_LABELS = {"bilgi": "BİLGİ", "düşük": "DÜŞÜK", "orta": "ORTA", "
 
 
 @dataclass
+class Fix:
+    """An automatic fix for one file. dev/ino pin the exact file that was scanned, so the fix
+    is never applied to something that replaced it in the meantime."""
+
+    action: str  # "chmod" (remove clear_bits) or "chown" (give the file to uid)
+    path: str
+    dev: int
+    ino: int
+    clear_bits: int = 0
+    uid: int = 0
+
+
+@dataclass
 class Finding:
     """One audit result, written for the user in Turkish."""
 
@@ -54,6 +77,7 @@ class Finding:
     target: str  # "tcp 0.0.0.0:22" or a file path
     message: str  # what was found
     suggestion: str  # what to do about it
+    fix: Fix | None = None  # set when the fix is safe to apply automatically
 
 
 # ---------------------------------------------------------------------------------------------
@@ -375,6 +399,7 @@ def check_entry(path: str, info: os.stat_result) -> Finding | None:
                 path,
                 f"Herkesin yazabildiği klasör, yapışkan bit (sticky) yok ({octal}).",
                 f"chmod o-w '{path}'  (paylaşılan bir klasörse: chmod +t '{path}')",
+                Fix("chmod", path, info.st_dev, info.st_ino, clear_bits=stat.S_IWOTH),
             )
         return None
     if not stat.S_ISREG(mode):
@@ -386,6 +411,7 @@ def check_entry(path: str, info: os.stat_result) -> Finding | None:
             path,
             f"Herkesin değiştirebildiği dosya ({octal}).",
             f"chmod o-w '{path}'",
+            Fix("chmod", path, info.st_dev, info.st_ino, clear_bits=stat.S_IWOTH),
         )
     if mode & (stat.S_ISUID | stat.S_ISGID) and path not in EXPECTED_SETID:
         kind = "SUID" if mode & stat.S_ISUID else "SGID"
@@ -423,6 +449,7 @@ def audit_sensitive_files(
                     path,
                     f"Hassas dosya ({description}) fazla açık: {mode:04o}.",
                     f"chmod {allowed:04o} '{path}'",
+                    Fix("chmod", path, info.st_dev, info.st_ino, clear_bits=forbidden),
                 )
             )
         if info.st_uid != 0 and path.startswith(("/etc/", "/usr/")):
@@ -433,6 +460,7 @@ def audit_sensitive_files(
                     path,
                     f"Hassas dosya ({description}) root'a ait değil (uid {info.st_uid}).",
                     f"chown root '{path}'",
+                    Fix("chown", path, info.st_dev, info.st_ino, uid=0),
                 )
             )
     return findings
@@ -451,6 +479,137 @@ def audit_permissions(
         if finding is not None:
             findings.append(finding)
     return findings
+
+
+# ---------------------------------------------------------------------------------------------
+# Hardening (remediation)
+# ---------------------------------------------------------------------------------------------
+
+REMEDIATION_LOG = "/var/log/perdix/kilavuz.log"
+# Remediation states, in Turkish like the report.
+PLANNED = "uygulanabilir"  # --fix: would be applied by --apply
+MANUAL = "elle"  # no safe automatic fix; follow the suggestion by hand
+APPLIED = "uygulandı"
+ALREADY_OK = "zaten düzgün"  # fixed in the meantime
+SKIPPED = "atlandı"  # the file changed since the scan; left alone
+FAILED = "hata"
+RESOLVED = (APPLIED, ALREADY_OK)
+
+
+@dataclass
+class Remediation:
+    finding: Finding
+    status: str  # one of the states above
+    detail: str
+
+
+def apply_fix(fix: Fix) -> tuple[str, str]:
+    """Apply one fix; returns (status, detail).
+
+    The file is opened without following symlinks and checked against the device/inode seen
+    during the scan, and the change is made on that open file (fchmod/fchown). So a file that
+    was swapped for a symlink or another file after the scan is never touched."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        fd = os.open(fix.path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            return SKIPPED, "dosya bir sembolik bağlantı; dokunulmadı"
+        if error.errno == errno.ENOENT:
+            return SKIPPED, "dosya artık yok"
+        return FAILED, error.strerror or str(error)
+    try:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != (fix.dev, fix.ino):
+            return SKIPPED, "dosya taramadan sonra değişmiş; dokunulmadı"
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            return SKIPPED, "normal dosya ya da klasör değil; dokunulmadı"
+        if fix.action == "chmod":
+            old = stat.S_IMODE(info.st_mode)
+            new = old & ~fix.clear_bits
+            if new == old:
+                return ALREADY_OK, f"izinler zaten {old:04o}"
+            os.fchmod(fd, new)
+            return APPLIED, f"izinler {old:04o} → {new:04o}"
+        if fix.action == "chown":
+            if info.st_uid == fix.uid:
+                return ALREADY_OK, f"sahibi zaten uid {fix.uid}"
+            os.fchown(fd, fix.uid, -1)
+            return APPLIED, f"sahibi uid {info.st_uid} → {fix.uid}"
+        return FAILED, f"bilinmeyen işlem: {fix.action}"
+    except OSError as error:
+        return FAILED, error.strerror or str(error)
+    finally:
+        os.close(fd)
+
+
+def remediate(
+    findings: Iterable[Finding], apply: bool = False, log_path: str | None = REMEDIATION_LOG
+) -> list[Remediation]:
+    """The hardening plan for the findings, or (apply=True) the result of carrying it out.
+
+    Only findings with a Fix are applied; ports and SUID/SGID programs are always left to the
+    user. Applied changes are appended to log_path as JSON lines (old and new mode or owner),
+    so every change can be traced and undone."""
+    results = []
+    for finding in findings:
+        if finding.fix is None:
+            results.append(Remediation(finding, MANUAL, finding.suggestion))
+        elif not apply:
+            results.append(Remediation(finding, PLANNED, finding.suggestion))
+        else:
+            results.append(Remediation(finding, *apply_fix(finding.fix)))
+    if apply and log_path:
+        write_remediation_log(results, log_path)
+    return results
+
+
+def write_remediation_log(results: Iterable[Remediation], log_path: str) -> None:
+    """Append applied and failed fixes to the log. Logging problems never stop hardening."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    entries = [
+        json.dumps(
+            {
+                "time": now,
+                "path": r.finding.fix.path,
+                "action": r.finding.fix.action,
+                "status": r.status,
+                "detail": r.detail,
+            },
+            ensure_ascii=False,
+        )
+        for r in results
+        if r.finding.fix is not None and r.status in (APPLIED, FAILED)
+    ]
+    if not entries:
+        return
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(entries) + "\n")
+    except OSError:
+        pass
+
+
+def format_remediation(results: list[Remediation], applied: bool) -> str:
+    """The hardening plan or its results as Turkish text."""
+    title = "Sertleştirme sonuçları" if applied else "Sertleştirme planı (hiçbir şey değişmedi)"
+    lines = ["", title, "-" * len(title)]
+    automatic = [r for r in results if r.status != MANUAL]
+    manual = [r for r in results if r.status == MANUAL and r.finding.severity != "bilgi"]
+    if not automatic and not manual:
+        lines.append("Yapılacak bir şey yok.")
+    for r in automatic:
+        lines.append(f"[{r.status}] {r.finding.target}: {r.detail}")
+    if automatic and not applied:
+        lines.append(
+            f"Bu {len(automatic)} düzeltmeyi uygulamak için: "
+            "sudo python3 perdix_kilavuz.py --apply"
+        )
+    if manual:
+        lines += ["", "Elle yapılması gerekenler (otomatik uygulanmaz):"]
+        lines += [f"  {r.finding.target}: {r.finding.suggestion}" for r in manual]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -511,7 +670,7 @@ def format_report(report: AuditReport) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="PERDIX Kılavuz: açık port ve dosya izni denetimi "
-        "(yalnızca okur, sistemi değiştirmez)."
+        "(--apply verilmedikçe sistemi değiştirmez)."
     )
     parser.add_argument("--json", action="store_true", help="bulguları JSON olarak yaz")
     parser.add_argument(
@@ -522,25 +681,40 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument(
         "--perms-only", action="store_true", help="yalnızca dosya izinlerini denetle"
     )
+    parser.add_argument(
+        "--fix", action="store_true", help="sertleştirme planını göster (hiçbir şey değiştirmez)"
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="otomatik düzeltmeleri uygula (yalnızca izinler; root gerekir)",
+    )
+    parser.add_argument("--log", default=REMEDIATION_LOG, help="uygulanan değişikliklerin günlüğü")
     args = parser.parse_args(argv)
     report = run_audit(
         ports=not args.perms_only, permissions=not args.ports_only, roots=args.paths
     )
+    findings = report.sorted_findings()
+    results = None
+    if args.fix or args.apply:
+        results = remediate(findings, apply=args.apply, log_path=args.log)
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "as_root": report.as_root,
-                    "findings": [asdict(f) for f in report.sorted_findings()],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        data: dict = {"as_root": report.as_root, "findings": [asdict(f) for f in findings]}
+        if results is not None:
+            data["remediation"] = [
+                {"target": r.finding.target, "status": r.status, "detail": r.detail}
+                for r in results
+            ]
+        print(json.dumps(data, ensure_ascii=False, indent=2))
     else:
         print(format_report(report))
-    # Exit code 1 when something high-severity was found, so scripts can react.
-    return 1 if any(f.severity == "yüksek" for f in report.findings) else 0
+        if results is not None:
+            print(format_remediation(results, applied=args.apply))
+    # Exit code 1 while something high-severity is still open, so scripts can react.
+    if results is not None and args.apply:
+        resolved = {id(r.finding) for r in results if r.status in RESOLVED}
+        findings = [f for f in findings if id(f) not in resolved]
+    return 1 if any(f.severity == "yüksek" for f in findings) else 0
 
 
 if __name__ == "__main__":
