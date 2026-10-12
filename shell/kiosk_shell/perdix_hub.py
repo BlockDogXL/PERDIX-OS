@@ -9,8 +9,11 @@ accents, 4 px corners). A vertical menu on the left switches the module shown on
   03 Macro Studio      key / text / delay macros, saved as JSON, played through uinput
   04 Game Mode & HUD   ULTRA FPS / COMPETITOR MODE switch; PERDIX HUD theme engine for MangoHud
   05 Network           Zero-Ping: BBR congestion control and tc QoS (game UDP first)
+  06 Kılavuz           PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
+                       "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
 
-Root-level changes (CPU governor, sysctl, tc) go through `pkexec /usr/local/bin/perdix-tune`.
+Root-level changes (CPU governor, sysctl, tc, hardening) go through
+`pkexec /usr/local/bin/perdix-tune`.
 
 User settings live in ~/.config/perdix-os/ (settings.json, macros.json, theme.json for the
 orange / ice-blue accents); the HUD config is written to ~/.config/MangoHud/MangoHud.conf.
@@ -52,7 +55,9 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizeGrip,
     QSizePolicy,
     QSlider,
@@ -65,8 +70,8 @@ from PyQt5.QtWidgets import (
 )
 
 from kiosk_shell import __version__, paths
-from kiosk_shell.services import (competitor, hub_settings, hud, keywatch, macros, magnifier, mouse, perflog,
-                                  theme, tuning)
+from kiosk_shell.services import (competitor, hub_settings, hud, keywatch, kilavuz, macros, magnifier, mouse,
+                                  perflog, theme, tuning)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -299,12 +304,12 @@ class LabeledSlider(QWidget):
 
 
 class PageHeader(QWidget):
-    def __init__(self, index: str, area: str, title: str, text: str, parent=None) -> None:
+    def __init__(self, index: str, area: str, title: str, text: str, parent=None, module_word: str = "Module") -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 6)
         layout.setSpacing(4)
-        layout.addWidget(tracked_label(f"Module {index}  //  {area}", "EyebrowOrange"))
+        layout.addWidget(tracked_label(f"{module_word} {index}  //  {area}", "EyebrowOrange"))
         title_label = QLabel(title.upper(), objectName="PageTitle")
         font = QFont(title_label.font())
         font.setLetterSpacing(QFont.AbsoluteSpacing, 3)
@@ -358,6 +363,11 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcMoveTo(QRectF(-r, 30 - r, 2 * r, 2 * r), 45)
             p.arcTo(QRectF(-r, 30 - r, 2 * r, 2 * r), 45, 90)
         p.addEllipse(QPointF(0, 30), 4, 4)
+    elif kind == "shield":
+        p.moveTo(0, -44); p.lineTo(36, -30); p.lineTo(36, 0)
+        p.cubicTo(36, 24, 18, 38, 0, 46); p.cubicTo(-18, 38, -36, 24, -36, 0)
+        p.lineTo(-36, -30); p.closeSubpath()
+        p.moveTo(-16, 0); p.lineTo(-4, 12); p.lineTo(18, -12)
     elif kind == "bolt":
         p.moveTo(8, -46); p.lineTo(-24, 6); p.lineTo(0, 6); p.lineTo(-8, 46)
         p.lineTo(24, -6); p.lineTo(0, -6); p.closeSubpath()
@@ -1951,6 +1961,246 @@ class NetworkPage(QWidget):
         self._run(steps, "Restoring defaults…")
 
 
+# --- 06 PERDIX Kılavuz -----------------------------------------------------------------------------
+
+
+def turkish_upper(text: str) -> str:
+    """Upper case with Turkish rules: i -> İ, ı -> I (str.upper() would turn "Bilgi" into "BILGI")."""
+    return text.replace("i", "İ").replace("ı", "I").upper()
+
+
+SEVERITY_COLORS = {"yüksek": DANGER, "orta": ORANGE, "düşük": ICE, "bilgi": MUTED}
+CATEGORY_NAMES = {"port": "Port", "izin": "Dosya izni"}
+
+
+class SecurityPage(QWidget):
+    """PERDIX Kılavuz: scan results and the "Açıkları Kapat" button. All text is Turkish."""
+
+    COLUMNS = ("Önem", "Tür", "Hedef", "Bulgu", "Düzeltme")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self.report = None  # perdix_kilavuz.AuditReport of the last scan
+        self.scanned = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+        layout.addWidget(PageHeader(
+            "06", turkish_upper("Güvenlik"), turkish_upper("PERDIX Kılavuz"),
+            "Açık portları ve zayıf dosya izinlerini denetler. Güvenle düzeltilebilenler "
+            "\"Açıkları Kapat\" ile tek tuşla kapatılır; geri kalanlar ne yapmanız gerektiğiyle "
+            "birlikte listelenir.",
+            module_word="MODÜL"))
+
+        summary = Card(turkish_upper("Durum"))
+        row = QHBoxLayout()
+        self.counts = {}
+        for severity in ("yüksek", "orta", "düşük", "bilgi"):
+            readout = Readout(turkish_upper(severity), small=True)
+            readout.value.setStyleSheet(f"color: {SEVERITY_COLORS[severity]};")
+            self.counts[severity] = readout
+            row.addWidget(readout)
+        self.last_scan = Readout(turkish_upper("Son tarama"), small=True)
+        row.addWidget(self.last_scan)
+        row.addStretch(1)
+        self.scan_button = button("Taramayı Başlat")
+        self.scan_button.clicked.connect(self.start_scan)
+        self.close_button = primary_button("Açıkları Kapat")
+        self.close_button.setMinimumHeight(44)
+        self.close_button.setEnabled(False)
+        self.close_button.clicked.connect(self.close_clicked)
+        row.addWidget(self.scan_button)
+        row.addWidget(self.close_button)
+        summary.body.addLayout(row)
+        self.status = QLabel("Tarama henüz yapılmadı.", objectName="Muted", wordWrap=True)
+        summary.body.addWidget(self.status)
+        layout.addWidget(summary)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(18)
+        layout.addLayout(columns, 1)
+
+        findings = Card(turkish_upper("Bulgular"))
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels([turkish_upper(c) for c in self.COLUMNS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideMiddle)  # long paths keep their file name visible
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        header = self.table.horizontalHeader()
+        # Target and finding share the free width; the short columns fit their content.
+        for column, mode in enumerate((QHeaderView.ResizeToContents, QHeaderView.ResizeToContents,
+                                       QHeaderView.Stretch, QHeaderView.Stretch,
+                                       QHeaderView.ResizeToContents)):
+            header.setSectionResizeMode(column, mode)
+        self.table.setMinimumHeight(150)
+        self.table.itemSelectionChanged.connect(self.show_details)
+        findings.body.addWidget(self.table, 1)
+        # The selected finding in full: the whole path, the finding and what to do about it.
+        self.details = QLabel("Ayrıntılar için tablodan bir bulgu seçin.", objectName="Muted", wordWrap=True)
+        self.details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.details.setMinimumHeight(64)
+        self.details.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        findings.body.addWidget(self.details)
+        columns.addWidget(findings, 7)
+
+        explain = Card(turkish_upper("Açıkları Kapat ne yapar?"))
+        # Scrolls instead of squeezing the text together in a small window.
+        scroll = QScrollArea(widgetResizable=True, frameShape=QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        explain_body = QWidget()
+        explain_layout = QVBoxLayout(explain_body)
+        explain_layout.setContentsMargins(0, 0, 6, 0)
+        explain_layout.setSpacing(12)
+        scroll.setWidget(explain_body)
+        explain.body.addWidget(scroll, 1)
+        for title, text in (
+            ("İzinler", "Herkesin yazabildiği dosya ve klasörlerden bu yetki kaldırılır. /etc/shadow, "
+                        "sudoers, SSH anahtarları ve PERDIX ayarları gibi hassas dosyalar sıkılaştırılır "
+                        "ve root'a geri verilir."),
+            ("Elle", "Ağa açık servisler ve beklenmeyen SUID programlar otomatik değiştirilmez: bir "
+                     "servisi durdurmak SSH'yi ya da Steam'i kesebilir. Bunlar tabloda, ne yapmanız "
+                     "gerektiğiyle birlikte kalır."),
+            ("Güvenlik", "Değişiklikleri perdix-tune root olarak yapar: klasörleri kendisi yeniden tarar "
+                         "ve yalnızca taradığı dosyanın kendisini değiştirir. Arada değiştirilen "
+                         "dosyalara dokunmaz."),
+            ("Kayıt", "Her değişiklik eski ve yeni izinleriyle /var/log/perdix/kilavuz.log dosyasına "
+                      "yazılır; gerekirse geri alınabilir."),
+        ):
+            explain_layout.addWidget(tracked_label(turkish_upper(title), "EyebrowOrange", 2))
+            explain_layout.addWidget(QLabel(text, objectName="Muted", wordWrap=True))
+        explain_layout.addStretch(1)
+        columns.addWidget(explain, 3)
+
+        if kilavuz.module_path() is None:
+            self.scan_button.setEnabled(False)
+            set_status(self.status, f"PERDIX Kılavuz bulunamadı ({kilavuz.INSTALLED}).", False)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self.scanned and self.scan_button.isEnabled():
+            self.start_scan()  # first visit: scan right away
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def _start(self, func, done, message: str) -> None:
+        self.scan_button.setEnabled(False)
+        self.close_button.setEnabled(False)
+        set_status(self.status, message, True)
+        self._worker = Worker(func, self)
+        self._worker.done.connect(done)
+        self._worker.start()
+
+    def start_scan(self) -> None:
+        if self.busy():
+            return
+        self.scanned = True
+        self._start(kilavuz.scan, self.show_report, "Taranıyor: açık portlar ve dosya izinleri…")
+
+    def show_report(self, report) -> None:
+        self.scan_button.setEnabled(True)
+        if isinstance(report, Exception):
+            set_status(self.status, f"Tarama başarısız: {report}", False)
+            return
+        self.report = report
+        findings = self.findings = report.sorted_findings()
+        for severity, readout in self.counts.items():
+            readout.set(str(sum(f.severity == severity for f in findings)))
+        self.last_scan.set(QDateTime.currentDateTime().toString("HH:mm"))
+        self.table.setRowCount(len(findings))
+        for row, finding in enumerate(findings):
+            cells = (
+                turkish_upper(finding.severity),
+                CATEGORY_NAMES.get(finding.category, finding.category),
+                finding.target,
+                finding.message,
+                "Otomatik" if finding.fix is not None else "Elle",
+            )
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setToolTip(text)
+                if column == 0:
+                    item.setForeground(qcolor(SEVERITY_COLORS.get(finding.severity, TEXT)))
+                if column == 4 and finding.fix is not None:
+                    item.setForeground(qcolor(ORANGE))
+                self.table.setItem(row, column, item)
+        if findings:
+            self.table.selectRow(0)
+        self.show_details()
+        fixable = self.fixable_count()
+        self.close_button.setEnabled(fixable > 0)
+        if not findings:
+            text = "Sorun bulunmadı."
+        elif fixable:
+            text = f"{len(findings)} bulgu; {fixable} tanesi \"Açıkları Kapat\" ile düzeltilebilir."
+        else:
+            text = f"{len(findings)} bulgu; otomatik düzeltilebilecek bir şey yok, öneriler tabloda."
+        if not report.as_root:
+            text += " Tarama kullanıcı yetkisiyle yapıldı; bazı portların sahibi görünmeyebilir."
+        set_status(self.status, text, True)
+
+    def show_details(self) -> None:
+        rows = self.table.selectionModel().selectedRows()
+        if not rows or not getattr(self, "findings", None):
+            self.details.setText("Ayrıntılar için tablodan bir bulgu seçin." if self.table.rowCount()
+                                 else "")
+            return
+        finding = self.findings[rows[0].row()]
+        fix = "otomatik düzeltilebilir" if finding.fix is not None else "elle yapılmalı"
+        # The target is in the table (and in full in the command for file findings).
+        self.details.setText(f"{finding.message}\nNe yapılmalı ({fix}): {finding.suggestion}")
+
+    def fixable_count(self) -> int:
+        if self.report is None:
+            return 0
+        return sum(f.fix is not None for f in self.report.findings)
+
+    def confirm_close(self, count: int) -> bool:
+        box = QMessageBox(self)
+        box.setWindowTitle("Açıkları Kapat")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"{count} bulgu için güvenli düzeltmeler root olarak uygulanacak.")
+        box.setInformativeText("Yalnızca dosya izinleri değişir; her değişiklik "
+                               "/var/log/perdix/kilavuz.log dosyasına yazılır. Devam edilsin mi?")
+        apply = box.addButton("Uygula", QMessageBox.AcceptRole)
+        box.addButton("Vazgeç", QMessageBox.RejectRole)
+        box.exec_()
+        return box.clickedButton() is apply
+
+    def close_clicked(self) -> None:
+        if self.busy() or not self.confirm_close(self.fixable_count()):
+            return
+        self._start(kilavuz.close_vulnerabilities, self.closed,
+                    "Açıklar kapatılıyor: klasörler root olarak yeniden taranıyor…")
+
+    def closed(self, result) -> None:
+        if isinstance(result, Exception):
+            ok, outcome = False, str(result)
+        else:
+            ok, outcome = result
+        self.scan_button.setEnabled(True)
+        self.close_button.setEnabled(self.fixable_count() > 0)
+        if not ok:
+            set_status(self.status, f"Açıklar kapatılamadı: {outcome}", False)
+            return
+        message = kilavuz.summarize(outcome)
+        failed = any(r.get("status") == "hata" for r in outcome)
+        # Re-scan so the table shows what is left; keep the outcome on screen afterwards.
+        self._start(kilavuz.scan, lambda report: self._after_close(report, message, not failed),
+                    message + " Yeniden taranıyor…")
+
+    def _after_close(self, report, message: str, ok: bool) -> None:
+        self.show_report(report)
+        if not isinstance(report, Exception):
+            set_status(self.status, f"{message} {self.status.text()}", ok)
+
+
 # --- Main window ----------------------------------------------------------------------------------
 
 
@@ -1961,6 +2211,7 @@ class HubWindow(QWidget):
         ("03", "macro", "Macro Studio", "Key, text and delay chains"),
         ("04", "hud", "Game Mode & HUD", "Competitor · PERDIX HUD"),
         ("05", "net", "Network", "Zero-Ping · BBR · QoS"),
+        ("06", "shield", "Kılavuz", "Güvenlik · port · izin"),
     ]
 
     def __init__(self) -> None:
@@ -1981,8 +2232,8 @@ class HubWindow(QWidget):
         middle.addWidget(self.sidebar)
         self.pages = QStackedWidget()
         self.sens, self.scope, self.macro = SensPage(), ScopePage(), MacroPage()
-        self.hud, self.network = HudPage(), NetworkPage()
-        for page in (self.sens, self.scope, self.macro, self.hud, self.network):
+        self.hud, self.network, self.security = HudPage(), NetworkPage(), SecurityPage()
+        for page in (self.sens, self.scope, self.macro, self.hud, self.network, self.security):
             holder = QWidget()
             holder_layout = QVBoxLayout(holder)
             holder_layout.setContentsMargins(32, 26, 32, 26)
@@ -2002,6 +2253,8 @@ class HubWindow(QWidget):
         if self.macro.runner is not None and self.macro.runner.isRunning():
             self.macro.runner.stop_requested = True
             self.macro.runner.wait(2000)
+        if self.security.busy():
+            self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)
 
     def paintEvent(self, event) -> None:

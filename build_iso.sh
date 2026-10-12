@@ -237,6 +237,10 @@ for file in usr/local/bin/perdix-tune \
 done
 ln -sf /etc/systemd/system/perdix-restore.service \
     "$AIROOTFS/etc/systemd/system/multi-user.target.wants/perdix-restore.service"
+# PERDIX Kılavuz (security audit): read by the Control Center's Kılavuz page and by
+# `perdix-tune harden`, so it lives in a root-owned place.
+install -D -m 644 -- "$REPO_DIR/apps/perdix-kilavuz/perdix_kilavuz.py" \
+    "$AIROOTFS/usr/local/lib/perdix/perdix_kilavuz.py"
 
 # --- Lockdown ---------------------------------------------------------------------------------
 mkdir -p "$AIROOTFS/etc/X11/xorg.conf.d" "$AIROOTFS/etc/polkit-1/rules.d" "$AIROOTFS/etc/sysctl.d"

@@ -105,6 +105,9 @@ assemble_profile() {
     mkdir -p -- "$profile/airootfs/opt/kiosk-shell"
     cp -a -- "$KIOSK_ROOT/shell/kiosk_shell" "$profile/airootfs/opt/kiosk-shell/"
     find "$profile/airootfs/opt/kiosk-shell" -name __pycache__ -prune -exec rm -rf -- {} +
+    # PERDIX Kılavuz (security audit), used by the Control Center and `perdix-tune harden`.
+    install -D -m 644 -- "$KIOSK_ROOT/apps/perdix-kilavuz/perdix_kilavuz.py" \
+        "$profile/airootfs/usr/local/lib/perdix/perdix_kilavuz.py"
     # Shown on the desktop's About System page.
     printf 'VERSION="%s"\nEDITION="Live ISO"\n' "$(date +%Y.%m.%d)" >"$profile/airootfs/etc/perdix-release"
 

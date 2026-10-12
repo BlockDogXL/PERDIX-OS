@@ -3,8 +3,9 @@
 `perdix_kilavuz.py` checks this machine for **open ports** and **weak file permissions**, then
 prints a Turkish report with a suggested fix for each finding. The audit reads the kernel's
 socket tables (`/proc/net/{tcp,tcp6,udp,udp6}`, plus `ss` when installed) and file metadata, and
-never contacts other hosts. It changes nothing unless you ask for hardening with `--apply`. No
-interface is attached yet; it is a plain script and a set of functions you can import.
+never contacts other hosts. It changes nothing unless you ask for hardening with `--apply`. It
+runs as a plain script, as a set of functions you can import, and as module 06 of PERDIX Control
+Center (below).
 
 ## Run
 
@@ -57,6 +58,18 @@ another file in the meantime is skipped (`atlandı`). Each change is appended to
 `/var/log/perdix/kilavuz.log` as a JSON line with the old and new mode or owner (`--log` changes
 the path), so it can be traced and undone. After `--apply`, the exit code is 1 only if a
 high-severity finding is still open.
+
+## In PERDIX Control Center
+
+Module **06 Kılavuz** (`shell/kiosk_shell/perdix_hub.py`, all text in Turkish) scans on first
+visit and on **Taramayı Başlat**. It shows the findings by severity, with the full finding and its
+fix for the selected row. Scanning runs as the logged-in user, because it only reads.
+
+**Açıkları Kapat** asks for confirmation, then runs `pkexec perdix-tune harden`. The root helper
+re-scans the default folders itself and applies only the automatic fixes above. The GUI never
+passes file paths to root. The page then shows how many fixes were applied, skipped or failed,
+and scans again so the table shows what is left. On the ISO the module is installed root-owned
+at `/usr/local/lib/perdix/perdix_kilavuz.py`; in a checkout the Control Center uses this copy.
 
 ## Use from Python
 
