@@ -2,7 +2,7 @@
 
 import shlex
 
-from PyQt5.QtCore import QObject, QProcess, pyqtSignal
+from PyQt5.QtCore import QObject, QProcess, QProcessEnvironment, pyqtSignal
 
 
 class AppLauncher(QObject):
@@ -23,12 +23,17 @@ class AppLauncher(QObject):
     def is_running(self) -> bool:
         return self._process.state() != QProcess.NotRunning
 
-    def start(self) -> None:
+    def start(self, extra_env: dict[str, str] | None = None) -> None:
+        """Start the program; extra_env is added to its environment (e.g. Competitor Mode's)."""
         if self.is_running():
             return
         if not self._argv:
             self.failed.emit("No command configured.")
             return
+        env = QProcessEnvironment.systemEnvironment()
+        for key, value in (extra_env or {}).items():
+            env.insert(key, value)
+        self._process.setProcessEnvironment(env)
         self._process.start(self._argv[0], self._argv[1:])
 
     def _on_error(self, error: QProcess.ProcessError) -> None:

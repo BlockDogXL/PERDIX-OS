@@ -1,4 +1,6 @@
-// Let the kiosk user power off, reboot and suspend without a password — nothing else.
+// The kiosk user may, without a password: power off, reboot and suspend, and run
+// /usr/local/bin/perdix-tune (CPU governor, TCP congestion control, QoS) through pkexec.
+// Nothing else.
 polkit.addRule(function (action, subject) {
     var allowed = [
         "org.freedesktop.login1.power-off",
@@ -6,6 +8,7 @@ polkit.addRule(function (action, subject) {
         "org.freedesktop.login1.reboot",
         "org.freedesktop.login1.reboot-multiple-sessions",
         "org.freedesktop.login1.suspend",
+        "org.perdix.tune",
     ];
     if (subject.user === "kiosk" && allowed.indexOf(action.id) >= 0) {
         return polkit.Result.YES;

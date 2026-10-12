@@ -129,7 +129,21 @@ UEFI
        CPU, GPU, memory).
    7. Optional: list installed Steam games by parsing `steamapps/*.acf` and launch
       them directly with `steam steam://rungameid/<appid>`.
-3. `kiosk-session` wraps the shell in a restart loop with crash back-off and logs
+3. **PERDIX Control Center** (`shell/kiosk_shell/perdix_hub.py`): frameless esports hub, graphite
+   with neon-orange / ice-blue accents. Modules:
+   - 01 Sens & Accel: Raw Accel-style curves (Off / Linear / Natural / Classic) sent to libinput's
+     custom acceleration profile through xinput as you change them, with a live graph; saved to
+     `~/.config/perdix/hub.json` and re-applied at login (`perdix_hub --apply-saved` in `.xinitrc`).
+     eDPI / cm-per-360 calculator and game-to-game converter.
+   - 02 Tactical Scope: crosshair designer + overlay (X11 shape mask, click-through); zoom key
+     watched with evdev, zooming the screen centre with `xrandr --transform` (Hyprland: `hyprctl`).
+   - 03 Macro Studio: key / text / delay macros, JSON, played on a uinput virtual keyboard.
+   - 04 Game Mode & HUD: ULTRA FPS / COMPETITOR MODE (`gamemoded -r`, CPU governor `performance`,
+     vsync-off env for Steam) and the PERDIX HUD theme engine editing `MangoHud.conf` in place.
+   - 05 Network (Zero-Ping): BBR + a `tc` policy (game UDP ports first, TCP downloads policed).
+   Root changes go through `pkexec /usr/local/bin/perdix-tune`, a validated helper the kiosk
+   user may run without a password (polkit action `org.perdix.tune`).
+4. `kiosk-session` wraps the shell in a restart loop with crash back-off and logs
    to `~/.local/state/kiosk/shell.log`.
 
 ### Phase 6 — Lockdown
@@ -228,7 +242,9 @@ perdix-os/
 │   │   ├── __main__.py
 │   │   ├── main_desktop.py     ← the desktop UI (home, files, scan, shutdown dialog)
 │   │   ├── config.py           ← reads /etc/kiosk/kiosk.conf
-│   │   ├── services/           ← launcher, power, antivirus, network, audio
+│   │   ├── perdix_hub.py       ← PERDIX Control Center (esports tuning hub)
+│   │   ├── services/           ← launcher, power, antivirus, system info; hub: mouse, macros,
+│   │   │                          hud, competitor, tuning, magnifier, keywatch, hub_settings
 │   │   ├── input/              ← gamepad handling
 │   │   └── resources/          ← icons, themes (QSS)
 │   └── tests/

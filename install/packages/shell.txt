@@ -4,3 +4,7 @@ python-pyqt5
 python-evdev
 python-dbus
 clamav
+# PERDIX Control Center: mouse curves, zoom key, root helper (pkexec)
+xorg-xinput
+xorg-xrandr
+polkit

@@ -95,6 +95,7 @@ assemble_profile() {
     cp -a -- "$KIOSK_ROOT/archiso/." "$profile/"
     # Shared system config. --update=none: ISO-specific files in archiso/airootfs take precedence.
     cp -a --update=none -- "$KIOSK_ROOT/rootfs/." "$profile/airootfs/"
+    find "$profile/airootfs" -name __pycache__ -prune -exec rm -rf -- {} +
 
     local home="$profile/airootfs/home/kiosk"
     mkdir -p -- "$home"

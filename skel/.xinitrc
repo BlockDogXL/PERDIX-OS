@@ -9,4 +9,6 @@ if [ -d /etc/X11/xinit/xinitrc.d ]; then
     unset f
 fi
 openbox &
+# Re-apply the mouse acceleration curve chosen in PERDIX Control Center (xinput resets at login).
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.perdix_hub --apply-saved >/dev/null 2>&1
 exec /usr/local/bin/kiosk-session

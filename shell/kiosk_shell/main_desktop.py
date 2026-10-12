@@ -56,10 +56,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from kiosk_shell.config import load_config
+from kiosk_shell.config import load_config, read_shell_vars
 from kiosk_shell.services import power
 from kiosk_shell.services.antivirus import ScanResult, VirusScanner
-from kiosk_shell.services import system_info
+from kiosk_shell.services import competitor, system_info
 from kiosk_shell.services.launcher import AppLauncher
 
 DEV_MODE = os.environ.get("KIOSK_DEV") == "1"
@@ -940,7 +940,8 @@ class MainDesktop(Backdrop):
             self.home.show_message("Steam is already running.")
             return
         self.home.show_message("Starting Steam…", seconds=20)
-        self.steam.start()
+        # Competitor Mode (PERDIX Control Center) leaves its game environment in a file.
+        self.steam.start(read_shell_vars(competitor.ENV_PATH))
 
     def _steam_started(self) -> None:
         self.home.steam_button.set_badge("RUNNING")

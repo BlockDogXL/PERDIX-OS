@@ -4,8 +4,9 @@
 # Builds a live ISO from Arch's "releng" profile that boots silently and logs the
 # unprivileged "kiosk" user straight into the PyQt5 desktop
 # (shell/kiosk_shell/main_desktop.py), with Steam and Mesa/Vulkan preinstalled.
-# From the repository it copies only the desktop (shell/kiosk_shell) and the boot
-# splash theme (rootfs/usr/share/plymouth/themes/perdix); everything else is inline.
+# From the repository it copies the desktop and Control Center (shell/kiosk_shell), the
+# boot splash theme, and the Control Center's system files (the perdix-tune root helper,
+# its polkit action, the uinput udev rule); everything else is inline.
 #
 # Usage:   sudo ./build_iso.sh [--nvidia]
 #          --nvidia  add NVIDIA's proprietary driver (GTX 16xx / RTX 20xx and newer)
@@ -76,7 +77,9 @@ msg "Adding packages..."
 # --- PERDIX OS: desktop ---
 python
 python-pyqt5
+python-evdev
 python-matplotlib
+xorg-xinput
 xorg-server
 xorg-xinit
 xorg-xset
@@ -185,6 +188,9 @@ unset f
 # Minimal window manager: lets Steam and games take focus and go full screen.
 openbox &
 
+# Re-apply the mouse acceleration curve chosen in PERDIX Control Center (xinput resets at login).
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.perdix_hub --apply-saved >/dev/null 2>&1
+
 # Launch the PERDIX desktop, and restart it if it ever exits or crashes.
 mkdir -p "$HOME/.local/state/perdix"
 while true; do
@@ -203,6 +209,15 @@ find "$AIROOTFS/opt/kiosk-shell" -name __pycache__ -prune -exec rm -rf -- {} +
 # Shown on the desktop's About System page.
 printf 'VERSION="%s"\nEDITION="Live ISO"\n' "$(date +%Y.%m.%d)" >"$AIROOTFS/etc/perdix-release"
 
+# PERDIX Control Center system files: perdix-tune (root helper for the CPU governor, BBR and
+# QoS, run through pkexec), its polkit action, and /dev/uinput access for Macro Studio.
+for file in usr/local/bin/perdix-tune \
+            usr/share/polkit-1/actions/org.perdix.tune.policy \
+            etc/udev/rules.d/60-perdix-uinput.rules \
+            etc/modules-load.d/perdix-uinput.conf; do
+    install -D -m 644 -- "$REPO_DIR/rootfs/$file" "$AIROOTFS/$file"
+done
+
 # --- Lockdown ---------------------------------------------------------------------------------
 mkdir -p "$AIROOTFS/etc/X11/xorg.conf.d" "$AIROOTFS/etc/polkit-1/rules.d" "$AIROOTFS/etc/sysctl.d"
 cat >"$AIROOTFS/etc/X11/xorg.conf.d/10-kiosk.conf" <<'EOF'
@@ -214,13 +229,15 @@ EndSection
 EOF
 
 cat >"$AIROOTFS/etc/polkit-1/rules.d/50-kiosk-power.rules" <<EOF
-// The kiosk user may power off and reboot without a password, nothing else.
+// The kiosk user may, without a password: power off, reboot, and run perdix-tune
+// (CPU governor, TCP congestion control, QoS) through pkexec. Nothing else.
 polkit.addRule(function (action, subject) {
     var allowed = [
         "org.freedesktop.login1.power-off",
         "org.freedesktop.login1.power-off-multiple-sessions",
         "org.freedesktop.login1.reboot",
         "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.perdix.tune",
     ];
     if (subject.user === "$KIOSK_USER" && allowed.indexOf(action.id) >= 0) {
         return polkit.Result.YES;
@@ -241,6 +258,7 @@ file_permissions+=(
   ["/home/$KIOSK_USER/.bash_profile"]="$KIOSK_UID:$KIOSK_UID:644"
   ["/home/$KIOSK_USER/.xinitrc"]="$KIOSK_UID:$KIOSK_UID:755"
   ["/home/$KIOSK_USER/.hushlogin"]="$KIOSK_UID:$KIOSK_UID:644"
+  ["/usr/local/bin/perdix-tune"]="0:0:755"
 )
 EOF
 
