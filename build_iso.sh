@@ -149,6 +149,9 @@ bluez
 bluez-utils
 blueman
 pipewire-audio
+# Sharing: desktop portal for Flatpak apps and file dialogs
+xdg-desktop-portal
+xdg-desktop-portal-gtk
 clamav
 plymouth
 EOF

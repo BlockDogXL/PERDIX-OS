@@ -20,6 +20,9 @@ Network & Sound
                        effects: volume boost, bass boost, microphone noise suppression
   Bluetooth            scan, pair (just-works agent), trust and connect headphones, speakers, game
                        controllers, mice and keyboards (bluetoothctl); Blueman for the rest
+Media
+  Sharing              screen sharing on Xorg for Discord, OBS and browsers; "PERDIX Stream Mix", a
+                       PipeWire virtual microphone carrying game sound + microphone; who records now
 System
   Task Manager         CPU, RAM and GPU use with history, running programs, End task / Kill;
                        hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
@@ -98,7 +101,7 @@ from PyQt5.QtWidgets import (
 from kiosk_shell import __version__, paths
 from kiosk_shell.services import (audio, bluetooth, competitor, devices, diagnostics, hub_settings, hud, keywatch,
                                   kilavuz,
-                                  macros, magnifier, mouse, network, perflog, region, taskman, theme, tuning,
+                                  macros, magnifier, mouse, network, perflog, region, sharing, taskman, theme, tuning,
                                   vision)
 
 # --- Look -----------------------------------------------------------------------------------------
@@ -377,6 +380,7 @@ NAV = [
     ("wifi", "wifi", "Network Settings", "Wi-Fi · Ethernet", "Network & Sound"),
     ("audio", "audio", "Audio", "Volume · EasyEffects", "Network & Sound"),
     ("bluetooth", "bluetooth", "Bluetooth", "Headsets · controllers", "Network & Sound"),
+    ("sharing", "share", "Sharing", "Screen · stream mix", "Media"),
     ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
     ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
     ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
@@ -430,6 +434,12 @@ def icon_path(kind: str) -> QPainterPath:
     elif kind == "bluetooth":  # the Bluetooth rune
         p.moveTo(-22, -22); p.lineTo(22, 20); p.lineTo(0, 42); p.lineTo(0, -42); p.lineTo(22, -20)
         p.lineTo(-22, 22)
+    elif kind == "share":  # a screen sending waves
+        p.addRoundedRect(QRectF(-44, -30, 64, 46), 4, 4)
+        p.moveTo(-24, 30); p.lineTo(0, 30); p.moveTo(-12, 16); p.lineTo(-12, 30)
+        for r in (12, 24):
+            p.arcMoveTo(QRectF(20 - r, -8 - r, 2 * r, 2 * r), -50)
+            p.arcTo(QRectF(20 - r, -8 - r, 2 * r, 2 * r), -50, 100)
     elif kind == "globe":  # a globe with meridians
         p.addEllipse(QPointF(0, 0), 42, 42)
         p.addEllipse(QPointF(0, 0), 18, 42)
@@ -3822,6 +3832,166 @@ class BluetoothPage(QWidget):
             self._worker.wait()
 
 
+class SharingPage(QWidget):
+    """Screen & audio sharing: the PERDIX Stream Mix virtual microphone, who is recording, and checks."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        values = sharing.settings()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("sharing"), "Media", "Screen & Audio Sharing",
+                                    "Share your game in Discord, OBS or a browser: the screen directly, the sound "
+                                    "through the PERDIX Stream Mix."))
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        left = QVBoxLayout()
+        left.setSpacing(16)
+        mix = Card("Stream mix")
+        mix.body.addWidget(QLabel("A virtual microphone that carries your game sound and your voice together. Pick "
+                                  "“PERDIX Stream Mix” as the microphone in Discord, OBS or the browser and your "
+                                  "friends hear both. What you hear does not change and gets no added delay.",
+                                  objectName="Muted", wordWrap=True))
+        self.enabled = QCheckBox("Stream mix on", cursor=Qt.PointingHandCursor, checked=values["enabled"])
+        self.game = QCheckBox("Game sound (everything you hear)", cursor=Qt.PointingHandCursor, checked=values["game"])
+        self.mic = QCheckBox("My microphone", cursor=Qt.PointingHandCursor, checked=values["mic"])
+        for box in (self.enabled, self.game, self.mic):
+            box.clicked.connect(self.apply)
+            mix.body.addWidget(box)
+        self.mix_status = QLabel(objectName="Muted", wordWrap=True)
+        mix.body.addWidget(self.mix_status)
+        left.addWidget(mix)
+
+        recording = Card("Recording sound now")
+        self.recording = QLabel(objectName="Muted", wordWrap=True)
+        recording.body.addWidget(self.recording)
+        left.addWidget(recording)
+        left.addStretch(1)
+        columns.addLayout(left, 5)
+
+        right = QVBoxLayout()
+        right.setSpacing(16)
+        checks = Card("Checks")
+        self.checks_grid = QGridLayout()
+        self.checks_grid.setColumnStretch(2, 1)
+        self.checks_grid.setHorizontalSpacing(12)
+        checks.body.addLayout(self.checks_grid)
+        right.addWidget(checks)
+
+        apps = Card("How to share")
+        for name, installed, tip in sharing.apps():
+            apps.body.addWidget(tracked_label(name + ("" if installed else " · not installed"),
+                                              "EyebrowOrange" if installed else "Muted", 2))
+            apps.body.addWidget(QLabel(tip, objectName="Muted", wordWrap=True))
+        right.addWidget(apps)
+        right.addStretch(1)
+        columns.addLayout(right, 5)
+        layout.addLayout(columns, 1)
+
+        self._timer = QTimer(self, interval=4000, timeout=self.refresh)
+        self.update_boxes()
+
+    def values(self) -> dict:
+        return {"enabled": self.enabled.isChecked(), "game": self.game.isChecked(), "mic": self.mic.isChecked()}
+
+    def update_boxes(self) -> None:
+        idle = not self.busy()
+        self.enabled.setEnabled(idle)
+        for box in (self.game, self.mic):
+            box.setEnabled(idle and self.enabled.isChecked())
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def _start(self, func, slot) -> None:
+        self._worker = Worker(func, self)
+        self._worker.done.connect(slot)
+        self._worker.start()
+        self.update_boxes()
+
+    def refresh(self) -> None:
+        if self.busy():
+            return
+
+        def work():
+            try:
+                g, error = sharing.graph(), ""
+            except sharing.SharingError as e:
+                g, error = None, str(e)
+            return g, sharing.checks(g, error)
+        self._start(work, self.show_state)
+
+    def apply(self) -> None:
+        if self.busy():
+            self._worker.wait()
+        values = self.values()
+        set_status(self.mix_status, "Setting up the stream mix…" if values["enabled"] else "Removing the stream mix…",
+                   True)
+        self._start(lambda: sharing.apply(values), self.applied)
+
+    def applied(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        if isinstance(result, Exception):
+            set_status(self.mix_status, str(result), False)
+        self.update_boxes()
+        self.refresh()
+
+    def show_state(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        self.update_boxes()
+        if isinstance(result, Exception):
+            set_status(self.mix_status, str(result), False)
+            return
+        g, checks = result
+        if g is not None:
+            status = sharing.mix_status(g)
+            on = self.enabled.isChecked()
+            set_status(self.mix_status, status.text() if status.exists or not on else
+                       "Stream mix is switched on but not in PipeWire yet.", status.exists == on)
+            apps = sharing.recording_apps(g)
+            self.recording.setText("\n".join(f"{app}  ←  {source}" for app, source in apps) if apps else
+                                   "No app is recording sound.")
+        else:
+            set_status(self.mix_status, "PipeWire is not running, so there is no sound to share.", False)
+            self.recording.setText("—")
+        self.show_checks(checks)
+
+    def show_checks(self, checks: list) -> None:
+        while self.checks_grid.count():
+            item = self.checks_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for row, check in enumerate(checks):
+            mark = QLabel("●")
+            mark.setStyleSheet(f"color: {ICE if check.ok else MUTED if check.ok is None else DANGER};")
+            name = QLabel(check.name)
+            detail = QLabel(check.detail, objectName="Muted", wordWrap=True)
+            self.checks_grid.addWidget(mark, row, 0, Qt.AlignTop)
+            self.checks_grid.addWidget(name, row, 1, Qt.AlignTop)
+            self.checks_grid.addWidget(detail, row, 2)
+
+    def shutdown(self) -> None:
+        self._timer.stop()
+        if self.busy():
+            self._worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -4072,7 +4242,7 @@ class HubWindow(QWidget):
              "vision": "VisionPage", "network": "NetworkPage", "wifi": "WifiPage", "audio": "AudioPage",
              "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage",
              "diagnostics": "DiagnosticsPage", "region": "RegionPage",
-             "bluetooth": "BluetoothPage"}
+             "bluetooth": "BluetoothPage", "sharing": "SharingPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -4126,6 +4296,7 @@ class HubWindow(QWidget):
         self.diagnostics.shutdown()
         self.region.shutdown()
         self.bluetooth.shutdown()
+        self.sharing.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

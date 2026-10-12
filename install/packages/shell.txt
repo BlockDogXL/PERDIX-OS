@@ -33,3 +33,7 @@ bluez
 bluez-utils
 blueman
 pipewire-audio
+# Control Center "Sharing": the desktop portal (Flatpak apps, file dialogs; ScreenCast on Wayland).
+# Screen capture itself is plain X11 on PERDIX; the stream mix only needs PipeWire (base.txt).
+xdg-desktop-portal
+xdg-desktop-portal-gtk
