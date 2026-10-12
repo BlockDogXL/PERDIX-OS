@@ -1,0 +1,64 @@
+Slot:	00:00.0
+Class:	Host bridge [0600]
+Vendor:	Advanced Micro Devices, Inc. [AMD] [1022]
+Device:	Raphael/Granite Ridge Root Complex [14d8]
+SVendor:	ASUSTeK Computer Inc. [1043]
+SDevice:	Device [8877]
+
+Slot:	03:00.0
+Class:	VGA compatible controller [0300]
+Vendor:	Advanced Micro Devices, Inc. [AMD/ATI] [1002]
+Device:	Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] [744c]
+SVendor:	Sapphire Technology Limited [1da2]
+SDevice:	Device [e471]
+Rev:	c8
+Driver:	amdgpu
+Module:	amdgpu
+
+Slot:	03:00.1
+Class:	Audio device [0403]
+Vendor:	Advanced Micro Devices, Inc. [AMD/ATI] [1002]
+Device:	Navi 31 HDMI/DP Audio [ab30]
+SVendor:	Advanced Micro Devices, Inc. [AMD/ATI] [1002]
+SDevice:	Navi 31 HDMI/DP Audio [ab30]
+Driver:	snd_hda_intel
+Module:	snd_hda_intel
+
+Slot:	07:00.0
+Class:	VGA compatible controller [0300]
+Vendor:	NVIDIA Corporation [10de]
+Device:	AD104 [GeForce RTX 4070] [2786]
+SVendor:	ZOTAC International (MCO) Ltd. [19da]
+SDevice:	Device [4675]
+Rev:	a1
+Module:	nouveau
+Module:	nvidia_drm
+
+Slot:	0c:00.0
+Class:	Ethernet controller [0200]
+Vendor:	Realtek Semiconductor Co., Ltd. [10ec]
+Device:	RTL8125 2.5GbE Controller [8125]
+Rev:	05
+Driver:	r8169
+Module:	r8169
+
+Slot:	0d:00.0
+Class:	Network controller [0280]
+Vendor:	Intel Corporation [8086]
+Device:	Wi-Fi 6E(802.11ax) AX210/AX1675* 2x2 [Typhoon Peak] [2725]
+Driver:	iwlwifi
+Module:	iwlwifi
+
+Slot:	0e:00.6
+Class:	Audio device [0403]
+Vendor:	Advanced Micro Devices, Inc. [AMD] [1022]
+Device:	Family 17h/19h HD Audio Controller [15e3]
+Driver:	snd_hda_intel
+Module:	snd_hda_intel
+
+Slot:	10:00.0
+Class:	Non-Volatile memory controller [0108]
+Vendor:	Samsung Electronics Co Ltd [144d]
+Device:	NVMe SSD Controller PM9A1/PM9A3/980PRO [a80a]
+Driver:	nvme
+Module:	nvme

@@ -22,3 +22,5 @@ python-xlib
 python-numpy
 # Control Center "Task Manager": CPU, memory and process figures
 python-psutil
+# Control Center "Devices": USB device names (pciutils for lspci is in base.txt)
+usbutils

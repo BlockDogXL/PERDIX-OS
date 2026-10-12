@@ -138,6 +138,9 @@ python-xlib
 python-numpy
 # Task Manager (CPU, memory, processes)
 python-psutil
+# Devices tab: lspci (driver in use) and lsusb
+pciutils
+usbutils
 clamav
 plymouth
 EOF

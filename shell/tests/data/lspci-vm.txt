@@ -1,0 +1,106 @@
+Slot:	00:00.0
+Class:	Host bridge [0600]
+Vendor:	Intel Corporation [8086]
+Device:	Device [0d57]
+ProgIf:	00
+
+Slot:	00:01.0
+Class:	Unassigned class [ffff]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 memory balloon [1045]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 memory balloon [1045]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:02.0
+Class:	Mass storage controller [0180]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 block device [1042]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 block device [1042]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:03.0
+Class:	Mass storage controller [0180]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 block device [1042]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 block device [1042]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:04.0
+Class:	Mass storage controller [0180]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 block device [1042]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 block device [1042]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:05.0
+Class:	Mass storage controller [0180]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 block device [1042]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 block device [1042]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:06.0
+Class:	Mass storage controller [0180]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 block device [1042]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 block device [1042]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:07.0
+Class:	Mass storage controller [0180]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 block device [1042]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 block device [1042]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:08.0
+Class:	Ethernet controller [0200]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 network device [1041]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 network device [1041]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:09.0
+Class:	Unassigned class [ffff]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 socket [1053]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 socket [1053]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+
+Slot:	00:0a.0
+Class:	Unassigned class [ffff]
+Vendor:	Red Hat, Inc. [1af4]
+Device:	Virtio 1.0 RNG [1044]
+SVendor:	Red Hat, Inc. [1af4]
+SDevice:	Virtio 1.0 RNG [1044]
+Rev:	01
+ProgIf:	00
+Driver:	virtio-pci
+

@@ -21,6 +21,8 @@ Network & Sound
 System
   Task Manager         CPU, RAM and GPU use with history, running programs, End task / Kill;
                        hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
+  Devices              motherboard and BIOS, PCI parts (graphics, sound, network, storage) with the
+                       driver in use (lspci -k), keyboards / mice / controllers, USB devices (lsusb)
 Maintenance
   Kılavuz              PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
                        "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
@@ -81,13 +83,15 @@ from PyQt5.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from kiosk_shell import __version__, paths
-from kiosk_shell.services import (audio, competitor, hub_settings, hud, keywatch, kilavuz, macros, magnifier,
-                                  mouse, network, perflog, taskman, theme, tuning, vision)
+from kiosk_shell.services import (audio, competitor, devices, hub_settings, hud, keywatch, kilavuz, macros,
+                                  magnifier, mouse, network, perflog, taskman, theme, tuning, vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -170,7 +174,7 @@ QCheckBox::indicator {{
 QCheckBox::indicator:hover {{ border-color: {ICE}; }}
 QCheckBox::indicator:checked {{ background: {ORANGE}; border-color: {ORANGE}; }}
 
-QListWidget, QTableWidget {{
+QListWidget, QTableWidget, QTreeWidget {{
     background: {FIELD}; border: 1px solid {LINE}; border-radius: {RADIUS}px; outline: none;
     gridline-color: {LINE}; selection-background-color: {_rgba(ICE, 40)}; selection-color: {ICE};
 }}
@@ -184,6 +188,8 @@ QListWidget::item:selected {{
     background: {_rgba(ORANGE, 30)}; color: {ORANGE}; border-left: 2px solid {ORANGE};
 }}
 QTableWidget::item {{ padding: 4px 8px; }}
+QTreeWidget::item {{ padding: 4px 4px; }}
+QTreeWidget::item:selected {{ background: {_rgba(ICE, 30)}; color: {ICE}; }}
 QTableWidget::item:selected {{ background: {_rgba(ICE, 30)}; color: {ICE}; }}
 QHeaderView::section {{
     background: {PANEL_2}; color: {MUTED}; border: none; border-bottom: 1px solid {LINE};
@@ -363,6 +369,7 @@ NAV = [
     ("wifi", "wifi", "Network Settings", "Wi-Fi · Ethernet", "Network & Sound"),
     ("audio", "audio", "Audio", "Volume · EasyEffects", "Network & Sound"),
     ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
+    ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
     ("security", "shield", "Kılavuz", "Güvenlik · port · izin", "Maintenance"),
 ]
 
@@ -409,6 +416,12 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50, 80)
         p.addEllipse(QPointF(0, 26), 5, 5)
         p.moveTo(-44, 40); p.lineTo(44, 40)
+    elif kind == "chip":  # a chip with pins
+        p.addRect(QRectF(-26, -26, 52, 52))
+        p.addRect(QRectF(-12, -12, 24, 24))
+        for i in (-16, 0, 16):
+            for x1, y1, x2, y2 in ((i, -26, i, -40), (i, 26, i, 40), (-26, i, -40, i), (26, i, 40, i)):
+                p.moveTo(x1, y1); p.lineTo(x2, y2)
     elif kind == "tasks":  # activity bars under a pulse line
         for x, h in ((-30, 20), (-12, 40), (6, 28), (24, 50)):
             p.addRect(QRectF(x, 44 - h, 12, h))
@@ -3110,6 +3123,126 @@ class TaskManagerPage(QWidget):
             self._monitor.close()
 
 
+# --- Devices ------------------------------------------------------------------------------------------
+
+
+class DevicesPage(QWidget):
+    """Motherboard, the PC's parts with their drivers, input devices and USB devices."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self.inventory: devices.Inventory | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("devices"), "System", "Devices",
+                                    "Every part inside and plugged into your PC, and the Linux driver that runs it. "
+                                    "Parts without a driver are marked."))
+
+        board = Card("Motherboard")
+        row = QHBoxLayout()
+        self.board_value = Readout("Board", small=True)
+        self.bios_value = Readout("BIOS", small=True)
+        self.system_value = Readout("System", small=True)
+        for r in (self.board_value, self.bios_value, self.system_value):
+            row.addWidget(r, 1)
+        self.refresh_button = button("Refresh")
+        self.refresh_button.clicked.connect(self.refresh)
+        row.addWidget(self.refresh_button, 0, Qt.AlignTop)
+        board.body.addLayout(row)
+        layout.addWidget(board)
+
+        self.warning = QLabel(wordWrap=True)
+        self.warning.setStyleSheet(f"color: {DANGER}; font-weight: 600;")
+        self.warning.hide()
+        layout.addWidget(self.warning)
+
+        card = Card("Hardware and drivers")
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["DEVICE", "DRIVER", "ID / LOCATION"])
+        self.tree.setRootIsDecorated(True)
+        self.tree.setUniformRowHeights(True)
+        header = self.tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tree.setMinimumHeight(300)
+        card.body.addWidget(self.tree, 1)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        card.body.addWidget(self.status)
+        layout.addWidget(card, 1)
+        self.loaded = False
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self.loaded:
+            self.refresh()
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def refresh(self) -> None:
+        if self.busy():
+            return
+        self.loaded = True
+        self.refresh_button.setEnabled(False)
+        self.status.setText("Reading the hardware list…")
+        self._worker = Worker(devices.inventory, self)
+        self._worker.done.connect(self.show_inventory)
+        self._worker.start()
+
+    def show_inventory(self, inventory) -> None:
+        self.refresh_button.setEnabled(True)
+        if isinstance(inventory, Exception):
+            set_status(self.status, f"Could not read the hardware list: {inventory}", False)
+            return
+        self.inventory = inventory
+        b = inventory.board
+        self.board_value.set(" ".join(x for x in (b.vendor, b.model) if x) or "Unknown")
+        self.bios_value.set(" ".join(x for x in (b.bios_version, f"({b.bios_date})" if b.bios_date else "") if x)
+                            or "Unknown")
+        self.system_value.set(b.system or "Unknown")
+        self.tree.clear()
+        for category, items in inventory.by_category():
+            group = QTreeWidgetItem([f"{category}  ({len(items)})", "", ""])
+            group.setForeground(0, qcolor(ORANGE))
+            font = QFont(group.font(0))
+            font.setBold(True)
+            group.setFont(0, font)
+            self.tree.addTopLevelItem(group)
+            for d in items:
+                name = f"{d.name}  —  {d.vendor}" if d.vendor else d.name
+                driver = d.driver or ("none (possible: " + ", ".join(d.modules) + ")" if d.modules else "none")
+                item = QTreeWidgetItem([name, driver, "  ".join(x for x in (d.ids, d.location) if x)])
+                item.setToolTip(0, name)
+                if d.has_driver:
+                    item.setForeground(1, qcolor(ICE))
+                elif d in inventory.missing_drivers:
+                    for column in range(3):
+                        item.setForeground(column, qcolor(DANGER))
+                else:
+                    item.setForeground(1, qcolor(MUTED))
+                group.addChild(item)
+            group.setExpanded(category != "Other")
+        missing = inventory.missing_drivers
+        if missing:
+            names = ", ".join(d.name for d in missing)
+            self.warning.setText(f"No driver in use for: {names}. These parts may not work until a driver "
+                                 "is installed (for NVIDIA cards: build the ISO with --nvidia).")
+            self.warning.show()
+        else:
+            self.warning.hide()
+        count = len(inventory.devices)
+        set_status(self.status, f"{count} devices found." + ("" if missing else " Every main part has a driver."),
+                   True)
+
+    def shutdown(self) -> None:
+        if self.busy():
+            self._worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -3358,7 +3491,7 @@ class HubWindow(QWidget):
     MODULES = [(f"{i + 1:02d}", icon, title, subtitle) for i, (_k, icon, title, subtitle, _g) in enumerate(NAV)]
     PAGES = {"sens": "SensPage", "scope": "ScopePage", "macro": "MacroPage", "hud": "HudPage",
              "vision": "VisionPage", "network": "NetworkPage", "wifi": "WifiPage", "audio": "AudioPage",
-             "security": "SecurityPage", "taskman": "TaskManagerPage"}
+             "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -3408,6 +3541,7 @@ class HubWindow(QWidget):
         self.audio.shutdown()
         self.vision.shutdown()
         self.taskman.shutdown()
+        self.devices.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)
