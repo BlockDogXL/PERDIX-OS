@@ -25,6 +25,8 @@ Media
                        PipeWire virtual microphone carrying game sound + microphone; who records now
   Camera & Mic         webcam preview at every resolution it offers, picture settings (v4l2-ctl);
                        microphone level meter, gain up to 150 % (wpctl), record and play back
+  Game Recording       OBS Studio in the background over obs-websocket 5: F9 (any game, evdev) starts
+                       and stops, 60 fps, GPU encoder (NVENC / VA-API) chosen after a test, MKV files
 System
   Task Manager         CPU, RAM and GPU use with history, running programs, End task / Kill;
                        hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
@@ -103,8 +105,8 @@ from PyQt5.QtWidgets import (
 
 from kiosk_shell import __version__, paths
 from kiosk_shell.services import (audio, bluetooth, camera, competitor, devices, diagnostics, hub_settings, hud,
-                                  keywatch, kilavuz, macros, magnifier, mictest, mouse, network, perflog, region,
-                                  sharing, taskman, theme, tuning, vision)
+                                  keywatch, kilavuz, macros, magnifier, mictest, mouse, network, perflog, recorder,
+                                  region, sharing, taskman, theme, tuning, vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -384,6 +386,7 @@ NAV = [
     ("bluetooth", "bluetooth", "Bluetooth", "Headsets · controllers", "Network & Sound"),
     ("sharing", "share", "Sharing", "Screen · stream mix", "Media"),
     ("cammic", "camera", "Camera & Mic", "Preview · level · gain", "Media"),
+    ("record", "rec", "Game Recording", "OBS · hotkey F9 · 60 fps", "Media"),
     ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
     ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
     ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
@@ -448,6 +451,11 @@ def icon_path(kind: str) -> QPainterPath:
         p.addEllipse(QPointF(0, -8), 12, 12)
         p.moveTo(0, 24); p.lineTo(0, 34)
         p.moveTo(-26, 40); p.lineTo(26, 40)
+    elif kind == "rec":  # a film frame with a record dot
+        p.addRoundedRect(QRectF(-44, -30, 88, 60), 6, 6)
+        p.addEllipse(QPointF(0, 0), 14, 14)
+        for x in (-34, 28):
+            p.addRect(QRectF(x, -22, 6, 6)); p.addRect(QRectF(x, 16, 6, 6))
     elif kind == "globe":  # a globe with meridians
         p.addEllipse(QPointF(0, 0), 42, 42)
         p.addEllipse(QPointF(0, 0), 18, 42)
@@ -4515,6 +4523,201 @@ class CameraMicPage(QWidget):
                 worker.wait()
 
 
+HOTKEY_NAMES = {"KEY_F9": "F9", "KEY_F10": "F10", "KEY_F11": "F11", "KEY_F12": "F12", "KEY_SCROLLLOCK": "Scroll Lock",
+                "KEY_PAUSE": "Pause"}
+
+
+class RecordingPage(QWidget):
+    """Game recording with OBS in the background: start/stop, live frame rate, settings, recent files."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.recorder = recorder.Recorder()
+        self._worker: Worker | None = None
+        self._status_worker: Worker | None = None
+        self.status_value = recorder.Status(False)
+        values = recorder.settings()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("record"), "Media", "Game Recording",
+                                    "Press the hotkey in any game to start and stop. OBS records in the background "
+                                    "on the graphics card's own video engine, so the game keeps its frame rate."))
+
+        top = Card("Recorder")
+        row = QHBoxLayout()
+        self.state_value = Readout("State", orange=True)
+        self.time_value = Readout("Time")
+        self.fps_value = Readout("Frame rate")
+        self.dropped_value = Readout("Dropped frames")
+        for r in (self.state_value, self.time_value, self.fps_value, self.dropped_value):
+            row.addWidget(r, 1)
+        self.record_button = primary_button("Start recording")
+        self.record_button.clicked.connect(self.toggle)
+        row.addWidget(self.record_button)
+        top.body.addLayout(row)
+        self.message = QLabel(objectName="Muted", wordWrap=True)
+        top.body.addWidget(self.message)
+        layout.addWidget(top)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        options = Card("Settings")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(12)
+        grid.setColumnStretch(1, 1)
+        self.hotkey = QComboBox()
+        for code, name in HOTKEY_NAMES.items():
+            self.hotkey.addItem(name, code)
+        self.hotkey.setCurrentIndex(max(0, self.hotkey.findData(values["hotkey"])))
+        self.hotkey.currentIndexChanged.connect(self.save)
+        grid.addWidget(QLabel("Hotkey"), 0, 0)
+        grid.addWidget(self.hotkey, 0, 1)
+        fps_row, self.fps_group = segmented([("30", "30 fps"), ("60", "60 fps")], str(values["fps"]))
+        self.fps_group.buttonClicked.connect(self.save)
+        grid.addWidget(QLabel("Frame rate"), 1, 0)
+        grid.addLayout(fps_row, 1, 1)
+        quality_row, self.quality_group = segmented(
+            [(key, f"{name} · {recorder.QUALITY_KBPS[key] // 1000} Mb/s") for key, name in
+             (("standard", "Standard"), ("high", "High"), ("max", "Max"))], values["quality"])
+        self.quality_group.buttonClicked.connect(self.save)
+        grid.addWidget(QLabel("Quality"), 2, 0)
+        grid.addLayout(quality_row, 2, 1)
+        self.encoder = QComboBox()
+        self.encoder.addItem("Automatic (graphics card first)", "auto")
+        seen = set()
+        for encoder_id, (label, _ffmpeg) in recorder.ENCODERS.items():
+            if label not in seen and recorder.obs_has_encoder(encoder_id):
+                seen.add(label)
+                self.encoder.addItem(label, encoder_id)
+        self.encoder.setCurrentIndex(max(0, self.encoder.findData(values["encoder"])))
+        self.encoder.currentIndexChanged.connect(self.save)
+        grid.addWidget(QLabel("Encoder"), 3, 0)
+        grid.addWidget(self.encoder, 3, 1)
+        self.microphone = QCheckBox("Record my microphone too", cursor=Qt.PointingHandCursor,
+                                    checked=values["microphone"])
+        self.microphone.clicked.connect(self.save)
+        grid.addWidget(self.microphone, 4, 1)
+        options.body.addLayout(grid)
+        self.encoder_note = QLabel(objectName="Muted", wordWrap=True)
+        options.body.addWidget(self.encoder_note)
+        ok, reason = keywatch.evdev_available()
+        self.hotkey_note = QLabel(objectName="Muted", wordWrap=True)
+        set_status(self.hotkey_note, "The hotkey works everywhere, also in fullscreen games." if ok
+                   else f"The hotkey is off: {reason}", ok)
+        options.body.addWidget(self.hotkey_note)
+        options.body.addStretch(1)
+        columns.addWidget(options, 5)
+
+        files = Card("Recent recordings")
+        self.files = QListWidget()
+        self.files.setMinimumHeight(200)
+        files.body.addWidget(self.files, 1)
+        files.body.addWidget(QLabel(f"Saved in {home_path(recorder.videos_dir())} as MKV (safe if the PC crashes).",
+                                    objectName="Muted", wordWrap=True))
+        columns.addWidget(files, 5)
+        layout.addLayout(columns, 1)
+
+        self._timer = QTimer(self, interval=1000, timeout=self.poll)
+        self.show_status(recorder.Status(False))
+
+    def values(self) -> dict:
+        return {"hotkey": self.hotkey.currentData(), "fps": int(group_value(self.fps_group) or 60),
+                "quality": group_value(self.quality_group) or "high", "microphone": self.microphone.isChecked(),
+                "encoder": self.encoder.currentData()}
+
+    def save(self, *_args) -> None:
+        hub_settings.save_section("recording", self.values())
+        set_status(self.message, "Saved. Applies to the next recording.", True)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.poll()
+        self.fill_files()
+        self._timer.start()
+        if not self.recorder.encoder and self.encoder.currentData() == "auto":
+            self.encoder_note.setText("Checking the graphics card's video engine…")
+            worker = Worker(recorder.detect_encoder, self)
+            worker.done.connect(self.encoder_detected)
+            worker.start()
+            self._detect_worker = worker
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def encoder_detected(self, result) -> None:
+        if isinstance(result, Exception):
+            return
+        self.recorder.encoder = result
+        label = recorder.ENCODERS[result][0]
+        set_status(self.encoder_note, f"Automatic uses {label}." + (
+            "" if result != "obs_x264" else " No working GPU video engine was found, so recording costs CPU time "
+                                            "and some frames per second."), result != "obs_x264")
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def poll(self) -> None:
+        if self._status_worker is not None and self._status_worker.isRunning():
+            return
+        self._status_worker = Worker(self.recorder.status, self)
+        self._status_worker.done.connect(self.show_status)
+        self._status_worker.start()
+
+    def show_status(self, status) -> None:
+        if isinstance(status, Exception):
+            return
+        was_recording = self.status_value.recording
+        self.status_value = status
+        self.state_value.set("● REC" if status.recording else "READY")
+        minutes, seconds = divmod(int(status.seconds), 60)
+        self.time_value.set(f"{minutes:02d}:{seconds:02d}" if status.recording else "—")
+        self.fps_value.set(f"{status.fps:.0f}" if status.recording else "—")
+        self.dropped_value.set(str(status.dropped) if status.recording else "—")
+        self.record_button.setText("Stop recording" if status.recording else "Start recording")
+        self.record_button.setEnabled(not self.busy())
+        if was_recording and not status.recording:
+            self.fill_files()
+
+    def toggle(self) -> None:
+        if self.busy():
+            return
+        action = self.recorder.stop if self.status_value.recording else self.recorder.start
+        set_status(self.message, "Stopping…" if self.status_value.recording else "Starting OBS…", True)
+        self.record_button.setEnabled(False)
+        self._worker = Worker(action, self)
+        self._worker.done.connect(self.toggled)
+        self._worker.start()
+
+    def toggled(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        set_status(self.message, str(result), not isinstance(result, Exception))
+        self.record_button.setEnabled(True)
+        self.poll()
+        self.fill_files()
+
+    def fill_files(self) -> None:
+        self.files.clear()
+        for path, modified, size in recorder.recordings():
+            when = QDateTime.fromSecsSinceEpoch(int(modified)).toString("dd.MM.yyyy  hh:mm")
+            item = QListWidgetItem(f"{os.path.basename(path)}    {when}    {taskman.human_bytes(size)}")
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self.files.addItem(item)
+        if not self.files.count():
+            self.files.addItem("No recordings yet.")
+
+    def shutdown(self) -> None:
+        self._timer.stop()
+        for worker in (self._worker, self._status_worker, getattr(self, "_detect_worker", None)):
+            if worker is not None and worker.isRunning():
+                worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -4766,7 +4969,7 @@ class HubWindow(QWidget):
              "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage",
              "diagnostics": "DiagnosticsPage", "region": "RegionPage",
              "bluetooth": "BluetoothPage", "sharing": "SharingPage",
-             "cammic": "CameraMicPage"}
+             "cammic": "CameraMicPage", "record": "RecordingPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -4822,6 +5025,7 @@ class HubWindow(QWidget):
         self.bluetooth.shutdown()
         self.sharing.shutdown()
         self.cammic.shutdown()
+        self.record.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

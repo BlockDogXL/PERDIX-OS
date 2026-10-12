@@ -155,6 +155,8 @@ xdg-desktop-portal-gtk
 # Camera & Mic: v4l2-ctl; ffmpeg for the camera preview (and the video cutter)
 v4l-utils
 ffmpeg
+# Game Recording: OBS Studio (obs-websocket built in) in the background
+obs-studio
 clamav
 plymouth
 EOF
@@ -250,8 +252,13 @@ openbox &
 # few seconds to start, and the desktop must not wait for it.
 PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.perdix_hub --apply-saved >/dev/null 2>&1 &
 
-# Launch the PERDIX desktop, and restart it if it ever exits or crashes.
+# Session helpers from PERDIX Control Center: the Stream Mix follower (Sharing) and the recording
+# hotkey (F9, OBS). Both stop by themselves when this session ends.
 mkdir -p "$HOME/.local/state/perdix"
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.sharing --follow >>"$HOME/.local/state/perdix/sharing.log" 2>&1 &
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.recorder --hotkey >>"$HOME/.local/state/perdix/recording.log" 2>&1 &
+
+# Launch the PERDIX desktop, and restart it if it ever exits or crashes.
 while true; do
     PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell >>"$HOME/.local/state/perdix/desktop.log" 2>&1
     echo "$(date -Is) desktop exited, restarting" >>"$HOME/.local/state/perdix/desktop.log"

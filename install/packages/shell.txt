@@ -41,3 +41,6 @@ xdg-desktop-portal-gtk
 # the camera for the preview (pw-record/wpctl for the microphone come with PipeWire).
 v4l-utils
 ffmpeg
+# Control Center "Game Recording": OBS Studio, driven over its built-in obs-websocket 5. GPU
+# encoding needs the VA-API driver (mesa for AMD, intel-media-driver for Intel) or NVIDIA's.
+obs-studio

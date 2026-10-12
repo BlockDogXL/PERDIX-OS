@@ -8,10 +8,13 @@ set -uo pipefail
 log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/kiosk"
 mkdir -p "$log_dir"
 
-# Keeps the PERDIX Stream Mix (Control Center > Sharing) in step with the sound devices.
+# Session helpers from PERDIX Control Center: the Stream Mix follower (Sharing) keeps the virtual
+# microphone in step with the sound devices; the recording hotkey (F9) starts and stops OBS.
 PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.sharing --follow >>"$log_dir/sharing.log" 2>&1 &
-follower=$!
-trap 'kill "$follower" 2>/dev/null' EXIT
+helpers=$!
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.recorder --hotkey >>"$log_dir/recording.log" 2>&1 &
+helpers="$helpers $!"
+trap 'kill $helpers 2>/dev/null' EXIT
 
 while true; do
     PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell >>"$log_dir/shell.log" 2>&1
