@@ -10,6 +10,7 @@ mkdir -p "$log_dir"
 
 while true; do
     PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell >>"$log_dir/shell.log" 2>&1
-    echo "$(date -Is) shell exited with status $?, restarting" >>"$log_dir/shell.log"
+    status=$?
+    echo "$(date -Is) shell exited with status $status, restarting" >>"$log_dir/shell.log"
     sleep "$KIOSK_RESTART_DELAY"
 done

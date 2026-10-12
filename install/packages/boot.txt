@@ -1,0 +1,2 @@
+# Silent boot: graphical splash between the bootloader and the shell
+plymouth

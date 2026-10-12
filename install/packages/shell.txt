@@ -3,4 +3,3 @@ python
 python-pyqt5
 python-evdev
 python-dbus
-plymouth

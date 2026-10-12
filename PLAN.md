@@ -101,7 +101,7 @@ UEFI
 1. `steps/60-silent-boot.sh`:
    - Kernel cmdline: `quiet splash loglevel=3 rd.udev.log_level=3
      systemd.show_status=auto vt.global_cursor_default=0`.
-   - Install `plymouth`, add the `plymouth` hook to `mkinitcpio.conf`, set the
+   - Install `packages/boot.txt` (`plymouth`), add the `plymouth` hook to `mkinitcpio.conf`, set the
      custom theme, regenerate the initramfs.
    - systemd-boot `loader.conf`: `timeout 0`, `console-mode keep`.
    - Leave `getty@tty2..6` alone: VT switching is disabled in Xorg instead (§Phase 6),
@@ -174,6 +174,7 @@ perdix-os/
 │   ├── lib/common.sh
 │   ├── packages/               ← one package per line, '#' comments allowed
 │   │   ├── base.txt
+│   │   ├── boot.txt
 │   │   ├── gaming.txt
 │   │   ├── gpu-amd.txt
 │   │   ├── gpu-intel.txt
