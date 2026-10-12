@@ -21,6 +21,8 @@ Network & Sound
 System
   Task Manager         CPU, RAM and GPU use with history, running programs, End task / Kill;
                        hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
+  Diagnostics          PERDIX System Diagnostics: GPU, Vulkan/OpenGL, DirectX through Proton (DXVK,
+                       VKD3D-Proton), RAM, BIOS, displays, disks; saved or copied as a text report
   Devices              motherboard and BIOS, PCI parts (graphics, sound, network, storage) with the
                        driver in use (lspci -k), keyboards / mice / controllers, USB devices (lsusb)
 Maintenance
@@ -90,8 +92,8 @@ from PyQt5.QtWidgets import (
 )
 
 from kiosk_shell import __version__, paths
-from kiosk_shell.services import (audio, competitor, devices, hub_settings, hud, keywatch, kilavuz, macros,
-                                  magnifier, mouse, network, perflog, taskman, theme, tuning, vision)
+from kiosk_shell.services import (audio, competitor, devices, diagnostics, hub_settings, hud, keywatch, kilavuz,
+                                  macros, magnifier, mouse, network, perflog, taskman, theme, tuning, vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -370,6 +372,7 @@ NAV = [
     ("audio", "audio", "Audio", "Volume · EasyEffects", "Network & Sound"),
     ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
     ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
+    ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
     ("security", "shield", "Kılavuz", "Güvenlik · port · izin", "Maintenance"),
 ]
 
@@ -416,6 +419,10 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50, 80)
         p.addEllipse(QPointF(0, 26), 5, 5)
         p.moveTo(-44, 40); p.lineTo(44, 40)
+    elif kind == "pulse":  # a monitor with a heartbeat line
+        p.addRoundedRect(QRectF(-44, -32, 88, 58), 4, 4)
+        p.moveTo(-14, 40); p.lineTo(14, 40); p.moveTo(0, 26); p.lineTo(0, 40)
+        p.moveTo(-34, 0); p.lineTo(-14, 0); p.lineTo(-6, -18); p.lineTo(6, 16); p.lineTo(14, 0); p.lineTo(34, 0)
     elif kind == "chip":  # a chip with pins
         p.addRect(QRectF(-26, -26, 52, 52))
         p.addRect(QRectF(-12, -12, 24, 24))
@@ -3243,6 +3250,141 @@ class DevicesPage(QWidget):
             self._worker.wait()
 
 
+# --- PERDIX System Diagnostics -------------------------------------------------------------------------
+
+
+class DiagnosticsPage(QWidget):
+    """One report: GPU, Vulkan, OpenGL, DirectX through Proton, RAM, BIOS, displays, disks."""
+
+    SUMMARY = ("GPU", "Vulkan", "DirectX", "RAM", "BIOS")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self.report: diagnostics.Report | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("diagnostics"), "System", "PERDIX System Diagnostics",
+                                    "What this PC is and what games can use: graphics, Vulkan, DirectX through "
+                                    "Proton, memory, BIOS. Save the report to send it with a support question."))
+
+        summary = Card("Summary")
+        row = QHBoxLayout()
+        self.summary = {}
+        for key in self.SUMMARY:
+            readout = Readout(key, small=True)
+            readout.value.setWordWrap(True)
+            self.summary[key] = readout
+            row.addWidget(readout, 2 if key == "GPU" else 1)
+        summary.body.addLayout(row)
+        layout.addWidget(summary)
+
+        self.problems = QLabel(wordWrap=True)
+        self.problems.setStyleSheet(f"color: {DANGER}; font-weight: 600;")
+        self.problems.hide()
+        layout.addWidget(self.problems)
+
+        card = Card("Report")
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderHidden(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tree.header().setStretchLastSection(True)
+        self.tree.setMinimumHeight(300)
+        card.body.addWidget(self.tree, 1)
+        actions = QHBoxLayout()
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        actions.addWidget(self.status, 1)
+        self.run_button = button("Run again")
+        self.run_button.clicked.connect(self.run)
+        self.copy_button = button("Copy")
+        self.copy_button.clicked.connect(self.copy)
+        self.save_button = primary_button("Save report")
+        self.save_button.clicked.connect(self.save)
+        for b in (self.run_button, self.copy_button, self.save_button):
+            actions.addWidget(b)
+        card.body.addLayout(actions)
+        layout.addWidget(card, 1)
+        self.loaded = False
+        self.update_buttons()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self.loaded:
+            self.run()
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def update_buttons(self) -> None:
+        for b in (self.copy_button, self.save_button):
+            b.setEnabled(self.report is not None and not self.busy())
+        self.run_button.setEnabled(not self.busy())
+
+    def run(self) -> None:
+        if self.busy():
+            return
+        self.loaded = True
+        set_status(self.status, "Running diagnostics (Vulkan, OpenGL, devices)…", True)
+        self._worker = Worker(diagnostics.build_report, self)
+        self._worker.done.connect(self.show_report)
+        self._worker.start()
+        self.update_buttons()
+
+    def show_report(self, report) -> None:
+        if isinstance(report, Exception):
+            set_status(self.status, f"Diagnostics failed: {report}", False)
+            self.update_buttons()
+            return
+        self.report = report
+        for key, readout in self.summary.items():
+            readout.set(report.summary.get(key, "—"))
+        self.tree.clear()
+        for title, rows in report.sections:
+            heading = QTreeWidgetItem([title.upper(), ""])
+            heading.setForeground(0, qcolor(ORANGE))
+            font = QFont(heading.font(0))
+            font.setBold(True)
+            heading.setFont(0, font)
+            self.tree.addTopLevelItem(heading)
+            for r in rows:
+                item = QTreeWidgetItem(["    " + r.key, r.value])
+                item.setToolTip(1, r.value)
+                color = DANGER if r.ok is False else ICE if r.ok else TEXT
+                item.setForeground(1, qcolor(color))
+                self.tree.addTopLevelItem(item)
+        problems = report.problems()
+        if problems:
+            self.problems.setText("To look at: " + "; ".join(f"{r.key}: {r.value}" for r in problems[:3])
+                                  + (f" (+{len(problems) - 3} more)" if len(problems) > 3 else ""))
+            self.problems.show()
+        else:
+            self.problems.hide()
+        set_status(self.status, f"Report from {report.created}.", True)
+        self.update_buttons()
+
+    def copy(self) -> None:
+        if self.report is not None:
+            QApplication.clipboard().setText(diagnostics.report_text(self.report))
+            set_status(self.status, "Report copied.", True)
+
+    def save(self) -> None:
+        if self.report is None:
+            return
+        try:
+            path = diagnostics.save_report(self.report)
+        except OSError as error:
+            set_status(self.status, f"Could not save: {error}", False)
+            return
+        set_status(self.status, f"Saved to {home_path(path)} (in My Files).", True)
+
+    def shutdown(self) -> None:
+        if self.busy():
+            self._worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -3491,7 +3633,8 @@ class HubWindow(QWidget):
     MODULES = [(f"{i + 1:02d}", icon, title, subtitle) for i, (_k, icon, title, subtitle, _g) in enumerate(NAV)]
     PAGES = {"sens": "SensPage", "scope": "ScopePage", "macro": "MacroPage", "hud": "HudPage",
              "vision": "VisionPage", "network": "NetworkPage", "wifi": "WifiPage", "audio": "AudioPage",
-             "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage"}
+             "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage",
+             "diagnostics": "DiagnosticsPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -3542,6 +3685,7 @@ class HubWindow(QWidget):
         self.vision.shutdown()
         self.taskman.shutdown()
         self.devices.shutdown()
+        self.diagnostics.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

@@ -141,6 +141,9 @@ python-psutil
 # Devices tab: lspci (driver in use) and lsusb
 pciutils
 usbutils
+# System Diagnostics: vulkaninfo, glxinfo
+vulkan-tools
+mesa-utils
 clamav
 plymouth
 EOF

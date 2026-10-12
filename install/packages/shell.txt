@@ -24,3 +24,6 @@ python-numpy
 python-psutil
 # Control Center "Devices": USB device names (pciutils for lspci is in base.txt)
 usbutils
+# Control Center "Diagnostics": vulkaninfo and glxinfo
+vulkan-tools
+mesa-utils
