@@ -1,22 +1,29 @@
 """PERDIX Control Center: the esports tuning hub of PERDIX OS.
 
 A frameless, custom-chromed PyQt5 window (dark graphite with neon-orange and ice-blue
-accents, 4 px corners). A vertical menu on the left switches the module shown on the right:
+accents, 4 px corners). A grouped, scrolling menu on the left (NAV below; module numbers follow
+its order) switches the module shown on the right:
 
-  01 Sens & Accel      Raw Accel-style curves (linear / natural / classic) on libinput, with a
+Gaming
+  Sens & Accel         Raw Accel-style curves (linear / natural / classic) on libinput, with a
                        graph; eDPI / cm-per-360 calculator and game converter
-  02 Tactical Scope    crosshair designer and overlay; zoom key (hold to magnify the centre)
-  03 Macro Studio      key / text / delay macros, saved as JSON, played through uinput
-  04 Game Mode & HUD   ULTRA FPS / COMPETITOR MODE switch; PERDIX HUD theme engine for MangoHud
-  05 Zero-Ping         BBR congestion control and tc QoS (game UDP first)
-  06 Network Settings  Wi-Fi and Ethernet through NetworkManager (nmcli): background scan, join
-                       with a password; wired connections come up on their own
-  07 Kılavuz           PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
-                       "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
-  08 Audio             PipeWire output/microphone device and volume (wpctl); one-click EasyEffects
-                       effects: volume boost, bass boost, microphone noise suppression
-  09 Vision            PERDIX Vision: brightness, contrast, vibrance, sharpening, shadow boost
+  Tactical Scope       crosshair designer and overlay; zoom key (hold to magnify the centre)
+  Macro Studio         key / text / delay macros, saved as JSON, played through uinput
+  Game Mode & HUD      ULTRA FPS / COMPETITOR MODE switch; PERDIX HUD theme engine for MangoHud
+  Vision               PERDIX Vision: brightness, contrast, vibrance, sharpening, shadow boost
                        (lift/gamma/gain) and .cube 3D LUTs for every game, applied live by gamescope
+Network & Sound
+  Zero-Ping            BBR congestion control and tc QoS (game UDP first)
+  Network Settings     Wi-Fi and Ethernet through NetworkManager (nmcli): background scan, join
+                       with a password; wired connections come up on their own
+  Audio                PipeWire output/microphone device and volume (wpctl); one-click EasyEffects
+                       effects: volume boost, bass boost, microphone noise suppression
+System
+  Task Manager         CPU, RAM and GPU use with history, running programs, End task / Kill;
+                       hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
+Maintenance
+  Kılavuz              PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
+                       "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
 
 Root-level changes (CPU governor, sysctl, tc, hardening) go through
 `pkexec /usr/local/bin/perdix-tune`.
@@ -80,7 +87,7 @@ from PyQt5.QtWidgets import (
 
 from kiosk_shell import __version__, paths
 from kiosk_shell.services import (audio, competitor, hub_settings, hud, keywatch, kilavuz, macros, magnifier,
-                                  mouse, network, perflog, theme, tuning, vision)
+                                  mouse, network, perflog, taskman, theme, tuning, vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -355,6 +362,7 @@ NAV = [
     ("network", "net", "Zero-Ping", "BBR · QoS · game priority", "Network & Sound"),
     ("wifi", "wifi", "Network Settings", "Wi-Fi · Ethernet", "Network & Sound"),
     ("audio", "audio", "Audio", "Volume · EasyEffects", "Network & Sound"),
+    ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
     ("security", "shield", "Kılavuz", "Güvenlik · port · izin", "Maintenance"),
 ]
 
@@ -401,6 +409,11 @@ def icon_path(kind: str) -> QPainterPath:
             p.arcTo(QRectF(-r, 26 - r, 2 * r, 2 * r), 50, 80)
         p.addEllipse(QPointF(0, 26), 5, 5)
         p.moveTo(-44, 40); p.lineTo(44, 40)
+    elif kind == "tasks":  # activity bars under a pulse line
+        for x, h in ((-30, 20), (-12, 40), (6, 28), (24, 50)):
+            p.addRect(QRectF(x, 44 - h, 12, h))
+        p.moveTo(-46, -20); p.lineTo(-22, -20); p.lineTo(-12, -42); p.lineTo(2, -4); p.lineTo(12, -24)
+        p.lineTo(46, -24)
     elif kind == "vision":  # eye with a crosshair pupil
         p.moveTo(-46, 0); p.cubicTo(-22, -34, 22, -34, 46, 0); p.cubicTo(22, 34, -22, 34, -46, 0)
         p.addEllipse(QPointF(0, 0), 14, 14)
@@ -2799,6 +2812,304 @@ class VisionPage(QWidget):
             self._worker.wait()
 
 
+# --- Task Manager ------------------------------------------------------------------------------------
+
+
+class UsageGraph(QWidget):
+    """A caption, the current value and the last minute as a line (one sample every 2 s)."""
+
+    HISTORY = 30
+
+    def __init__(self, caption: str, color: str, parent=None) -> None:
+        super().__init__(parent)
+        self.caption, self.color = caption, color
+        self.samples: list[float] = []
+        self.value_text, self.detail = "—", ""
+        self.setMinimumHeight(110)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def add(self, percent: float | None, value_text: str, detail: str = "") -> None:
+        if percent is not None:
+            self.samples = (self.samples + [max(0.0, min(100.0, percent))])[-self.HISTORY:]
+        self.value_text, self.detail = value_text, detail
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.fillRect(rect, qcolor(FIELD))
+        p.setPen(QPen(qcolor(LINE), 1))
+        p.drawRect(rect)
+        graph = rect.adjusted(10, 46, -10, -8)
+        for frac in (0.5,):
+            p.drawLine(QPointF(graph.left(), graph.top() + graph.height() * frac),
+                       QPointF(graph.right(), graph.top() + graph.height() * frac))
+        if len(self.samples) > 1:
+            step = graph.width() / (self.HISTORY - 1)
+            start = graph.right() - step * (len(self.samples) - 1)
+            line = QPainterPath()
+            for i, value in enumerate(self.samples):
+                point = QPointF(start + i * step, graph.bottom() - graph.height() * value / 100)
+                line.lineTo(point) if i else line.moveTo(point)
+            area = QPainterPath(line)
+            area.lineTo(graph.right(), graph.bottom())
+            area.lineTo(start, graph.bottom())
+            area.closeSubpath()
+            p.fillPath(area, qcolor(self.color, 0.14))
+            p.strokePath(line, QPen(qcolor(self.color), 2))
+        font = QFont(self.font())
+        font.setPixelSize(11)
+        font.setWeight(QFont.Bold)
+        font.setLetterSpacing(QFont.AbsoluteSpacing, 1.5)
+        p.setFont(font)
+        p.setPen(qcolor(MUTED))
+        p.drawText(QRectF(10, 8, rect.width() - 20, 14), Qt.AlignLeft | Qt.AlignVCenter, self.caption.upper())
+        p.drawText(QRectF(10, 8, rect.width() - 20, 14), Qt.AlignRight | Qt.AlignVCenter, self.detail)
+        mono = QFont(self.font())
+        mono.setFamily("DejaVu Sans Mono")
+        mono.setPixelSize(20)
+        mono.setWeight(QFont.DemiBold)
+        p.setFont(mono)
+        p.setPen(qcolor(self.color))
+        p.drawText(QRectF(10, 22, rect.width() - 20, 24), Qt.AlignLeft | Qt.AlignVCenter, self.value_text)
+
+
+class TaskManagerPage(QWidget):
+    """CPU, RAM and GPU use, running programs, and ending them. Refreshes every 2 s while visible."""
+
+    COLUMNS = ("Name", "Status", "CPU", "Memory", "PID")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self._monitor: taskman.TaskMonitor | None = None
+        self.processes: list[taskman.ProcessInfo] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("taskman"), "System", "Task Manager",
+                                    "What your PC is busy with right now. Programs that stop answering are "
+                                    "marked Not responding and can be killed with one click."))
+
+        graphs = QHBoxLayout()
+        graphs.setSpacing(16)
+        self.cpu_graph = UsageGraph("CPU", ORANGE)
+        self.ram_graph = UsageGraph("Memory", ICE)
+        self.gpu_graph = UsageGraph("GPU", "#b388ff")
+        for g in (self.cpu_graph, self.ram_graph, self.gpu_graph):
+            graphs.addWidget(g)
+        layout.addLayout(graphs)
+
+        self.hung_banner = QFrame(objectName="Card")
+        self.hung_banner.setStyleSheet(f"QFrame#Card {{ border: 1px solid {DANGER}; background: {_rgba(DANGER, 28)}; }}")
+        banner = QHBoxLayout(self.hung_banner)
+        banner.setContentsMargins(16, 10, 10, 10)
+        self.hung_label = QLabel(wordWrap=True)
+        self.hung_label.setStyleSheet(f"color: {DANGER}; font-weight: 700;")
+        banner.addWidget(self.hung_label, 1)
+        self.hung_kill = primary_button("Kill now")
+        self.hung_kill.clicked.connect(self.kill_hung)
+        banner.addWidget(self.hung_kill)
+        self.hung_banner.hide()
+        layout.addWidget(self.hung_banner)
+
+        card = Card("Running programs")
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels([c.upper() for c in self.COLUMNS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Default order: hung programs, then programs with a window, then the rest by CPU. A click on a
+        # column header sorts by that column instead (again to reverse).
+        self.sort_column: int | None = None
+        self.sort_descending = True
+        header = self.table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.sectionClicked.connect(self.header_clicked)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in range(1, len(self.COLUMNS)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.table.setMinimumHeight(220)
+        self.table.itemSelectionChanged.connect(self.update_buttons)
+        card.body.addWidget(self.table, 1)
+        actions = QHBoxLayout()
+        self.all_users = QCheckBox("Show system processes", cursor=Qt.PointingHandCursor)
+        self.all_users.toggled.connect(lambda _on: self.refresh())
+        actions.addWidget(self.all_users)
+        actions.addStretch(1)
+        self.end_button = primary_button("End task")
+        self.end_button.clicked.connect(lambda: self.end_selected(force=False))
+        self.kill_button = button("Kill")
+        self.kill_button.setToolTip("Stop it at once (SIGKILL); unsaved work in it is lost")
+        self.kill_button.clicked.connect(lambda: self.end_selected(force=True))
+        actions.addWidget(self.end_button)
+        actions.addWidget(self.kill_button)
+        card.body.addLayout(actions)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        card.body.addWidget(self.status)
+        layout.addWidget(card, 1)
+
+        self._timer = QTimer(self, interval=2000, timeout=self.refresh)
+        self.update_buttons()
+
+    # --- refresh ---
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def monitor(self) -> taskman.TaskMonitor:
+        if self._monitor is None:
+            self._monitor = taskman.TaskMonitor()
+        return self._monitor
+
+    def refresh(self) -> None:
+        if self.busy():
+            return
+        monitor, all_users = self.monitor(), self.all_users.isChecked()
+        self._worker = Worker(lambda: monitor.snapshot(all_users), self)
+        self._worker.done.connect(self.show_snapshot)
+        self._worker.start()
+
+    def show_snapshot(self, snap) -> None:
+        if isinstance(snap, Exception):
+            set_status(self.status, f"Could not read the process list: {snap}", False)
+            return
+        u = snap.usage
+        cores = len(u.per_core)
+        self.cpu_graph.add(u.cpu, f"{u.cpu:.0f} %", f"{cores} cores")
+        self.ram_graph.add(u.memory_percent, f"{u.memory_percent:.0f} %",
+                           f"{taskman.human_bytes(u.memory_used)} / {taskman.human_bytes(u.memory_total)}")
+        gpu = u.gpus[0] if u.gpus else None
+        if gpu is None:
+            self.gpu_graph.add(None, "n/a", "no load reported")
+        else:
+            vram = (f"VRAM {taskman.human_bytes(gpu.vram_used)} / {taskman.human_bytes(gpu.vram_total)}"
+                    if gpu.vram_total else gpu.name)
+            self.gpu_graph.add(gpu.load, f"{gpu.load:.0f} %" if gpu.load is not None else "n/a", vram)
+        self.fill_table(snap.processes)
+        hung = [p for p in snap.processes if p.responding is False]
+        if hung:
+            names = ", ".join(p.window_title for p in hung)
+            self.hung_label.setText(f"{names} {'is' if len(hung) == 1 else 'are'} not responding.")
+            self.hung_kill.setProperty("pids", [p.pid for p in hung])
+            self.hung_banner.show()
+        else:
+            self.hung_banner.hide()
+
+    def fill_table(self, procs: list[taskman.ProcessInfo]) -> None:
+        selected = self.selected()
+        keep = selected.pid if selected else None
+        self.processes = sorted(procs, key=lambda p: (p.responding is not False, not p.is_app, -p.cpu, p.name))
+        if self.sort_column is not None:
+            key = (lambda p: (p.window_title or p.name).lower(), lambda p: self.status_text(p),
+                   lambda p: p.cpu, lambda p: p.memory, lambda p: p.pid)[self.sort_column]
+            self.processes.sort(key=key, reverse=self.sort_descending)
+        self.table.setRowCount(len(self.processes))
+        for row, p in enumerate(self.processes):
+            name = p.window_title or p.name
+            cells = tuple(QTableWidgetItem(text) for text in (name, self.status_text(p), f"{p.cpu:.1f} %",
+                                                                 taskman.human_bytes(p.memory), str(p.pid)))
+            cells[0].setData(Qt.UserRole, p.pid)
+            cells[0].setToolTip(f"{p.name} (PID {p.pid}, {p.user})")
+            if p.responding is False:
+                for item in cells:
+                    item.setForeground(qcolor(DANGER))
+            elif p.protected:
+                cells[0].setForeground(qcolor(MUTED))
+            elif p.is_app:
+                cells[0].setForeground(qcolor(ICE))
+            for column, item in enumerate(cells):
+                self.table.setItem(row, column, item)
+        if keep is not None:
+            for row in range(self.table.rowCount()):
+                if self.table.item(row, 0).data(Qt.UserRole) == keep:
+                    self.table.selectRow(row)
+                    break
+        self.update_buttons()
+
+    @staticmethod
+    def status_text(p: taskman.ProcessInfo) -> str:
+        if p.responding is False:
+            return "Not responding"
+        if p.is_app:
+            return "Running"
+        return "Background" if p.status in ("sleeping", "running", "idle") else p.status.capitalize()
+
+    def header_clicked(self, column: int) -> None:
+        if self.sort_column == column:
+            self.sort_descending = not self.sort_descending
+        else:
+            self.sort_column, self.sort_descending = column, column in (2, 3)  # CPU and memory: largest first
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.horizontalHeader().setSortIndicator(column, Qt.DescendingOrder if self.sort_descending
+                                                       else Qt.AscendingOrder)
+        self.fill_table(self.processes)
+
+    # --- ending ---
+
+    def selected(self) -> taskman.ProcessInfo | None:
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        pid = self.table.item(rows[0].row(), 0).data(Qt.UserRole)
+        return next((p for p in self.processes if p.pid == pid), None)
+
+    def update_buttons(self) -> None:
+        p = self.selected()
+        can_end = p is not None and not p.protected and not self.busy()
+        self.end_button.setEnabled(can_end)
+        self.kill_button.setEnabled(can_end)
+        if p is not None and p.protected:
+            self.status.setText(f"{p.name} keeps PERDIX OS running and can't be ended here.")
+
+    def end_selected(self, force: bool) -> None:
+        p = self.selected()
+        if p is not None and not p.protected:
+            self._end([p.pid], force or p.responding is False, p.window_title or p.name)
+
+    def kill_hung(self) -> None:
+        pids = self.hung_kill.property("pids") or []
+        self._end(pids, True, self.hung_label.text().split(" is not")[0].split(" are not")[0])
+
+    def _end(self, pids: list[int], force: bool, name: str) -> None:
+        if self.busy():
+            self._worker.wait()
+        set_status(self.status, f"{'Killing' if force else 'Ending'} {name}…", True)
+
+        def work():
+            return [taskman.end_task(pid, force) for pid in pids]
+        self._worker = Worker(work, self)
+        self._worker.done.connect(lambda result: self._ended(result, name, force))
+        self._worker.start()
+        self.update_buttons()
+
+    def _ended(self, result, name: str, force: bool) -> None:
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+        else:
+            set_status(self.status, f"{name} was {'killed' if force else 'ended'}.", True)
+        self.hung_banner.hide()
+        self.refresh()
+
+    def shutdown(self) -> None:
+        self._timer.stop()
+        if self.busy():
+            self._worker.wait()
+        if self._monitor is not None:
+            self._monitor.close()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -3047,7 +3358,7 @@ class HubWindow(QWidget):
     MODULES = [(f"{i + 1:02d}", icon, title, subtitle) for i, (_k, icon, title, subtitle, _g) in enumerate(NAV)]
     PAGES = {"sens": "SensPage", "scope": "ScopePage", "macro": "MacroPage", "hud": "HudPage",
              "vision": "VisionPage", "network": "NetworkPage", "wifi": "WifiPage", "audio": "AudioPage",
-             "security": "SecurityPage"}
+             "security": "SecurityPage", "taskman": "TaskManagerPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -3096,6 +3407,7 @@ class HubWindow(QWidget):
         self.wifi.shutdown()
         self.audio.shutdown()
         self.vision.shutdown()
+        self.taskman.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

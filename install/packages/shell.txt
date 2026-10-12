@@ -20,3 +20,5 @@ rtkit
 gamescope
 python-xlib
 python-numpy
+# Control Center "Task Manager": CPU, memory and process figures
+python-psutil

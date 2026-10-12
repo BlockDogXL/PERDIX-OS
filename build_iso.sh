@@ -136,6 +136,8 @@ rtkit
 gamescope
 python-xlib
 python-numpy
+# Task Manager (CPU, memory, processes)
+python-psutil
 clamav
 plymouth
 EOF
