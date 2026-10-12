@@ -161,7 +161,7 @@ def test_desktop_badges_follow_the_app(desktop, fake_bin, monkeypatch):
 def test_seven_tiles_fit_a_1080p_screen(desktop):
     from kiosk_shell import main_desktop
     tiles = desktop.home.tiles()
-    assert [t.text() for t in tiles] == ["Open Games (Steam)", "My Files", "Office", "Drawing", "Antivirus Scan",
+    assert [t.text() for t in tiles] == ["Open Games (Steam)", "My Files", "Office", "Çizim Stüdyosu", "Antivirus Scan",
                                          "Control Center", "Shut Down System"]
     width = sum(t.width() for t in tiles) + main_desktop.px(18) * (len(tiles) - 1)
     assert width <= 1920 - 2 * main_desktop.px(56)

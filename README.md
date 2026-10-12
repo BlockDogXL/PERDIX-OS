@@ -23,7 +23,7 @@ sudo python3 apps/perdix-kilavuz/perdix_kilavuz.py          # --json, --ports-on
 sudo python3 apps/perdix-kilavuz/perdix_kilavuz.py --fix    # hardening plan; --apply applies it
 #   (also in Control Center: module 07 Kılavuz, with the 'Açıkları Kapat' button)
 
-# Office and drawing: the desktop's Office (LibreOffice) and Drawing (Krita) tiles; documents
+# Office and drawing: the desktop's Office (LibreOffice) and Çizim Stüdyosu (Krita) tiles; documents
 # double-clicked in My Files open in them. Packages: install/packages/office.txt.
 
 # Build the live ISO (on an Arch host, needs archiso >= 86 and ~10 GB free):

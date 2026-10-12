@@ -1,7 +1,7 @@
 """PERDIX OS desktop: the full-screen home screen the kiosk boots into.
 
 Black and neon-blue interface with Piri, the PERDIX mascot, glowing in the centre and
-seven actions: Open Games (Steam), My Files, Office (LibreOffice), Drawing (Krita), Antivirus
+seven actions: Open Games (Steam), My Files, Office (LibreOffice), Çizim Stüdyosu (Krita), Antivirus
 Scan, Control Center (the PERDIX Control Center, perdix_hub.py) and Shut Down System. The Piri
 icon in the top-left corner opens the About System page. The neon colour comes from
 ~/.config/perdix-os/theme.json.
@@ -592,8 +592,8 @@ class HomePage(QWidget):
         self.files_button = NeonButton("My Files", "files")
         self.office_button = NeonButton("Office", "office")
         self.office_button.setToolTip("LibreOffice: documents, spreadsheets, presentations (Word, Excel, PowerPoint)")
-        self.drawing_button = NeonButton("Drawing", "drawing")
-        self.drawing_button.setToolTip("Krita: digital painting and image editing")
+        self.drawing_button = NeonButton("Çizim Stüdyosu", "drawing")  # drawing studio
+        self.drawing_button.setToolTip("Krita: dijital boyama ve görüntü düzenleme (MyPaint fırçalarıyla)")
         self.scan_button = NeonButton("Antivirus Scan", "scan")
         self.hub_button = NeonButton("Control Center", "control")
         self.power_button = NeonButton("Shut Down System", "power")

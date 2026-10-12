@@ -106,13 +106,15 @@ mangohud
 lib32-mangohud
 cpupower
 # --- Office and drawing (desktop tiles, My Files): LibreOffice, Calibri/Cambria-compatible
-#     fonts, Krita; wmctrl brings their windows back to the front ---
+#     fonts, Krita with the MyPaint brush engine; wmctrl brings their windows to the front ---
 libreoffice-fresh
 libreoffice-fresh-tr
 hunspell-en_us
 ttf-carlito
 ttf-caladea
 krita
+libmypaint
+mypaint-brushes
 wmctrl
 # --- System: network (NetworkManager + nmcli, Wi-Fi via wpa_supplicant), audio, power
 #     permissions, antivirus, boot splash ---
@@ -244,7 +246,8 @@ for file in usr/local/bin/perdix-tune \
             etc/tmpfiles.d/perdix.conf \
             etc/sysusers.d/perdix.conf \
             etc/systemd/system/perdix-restore.service \
-            usr/lib/libreoffice/share/registry/perdix.xcd; do
+            usr/lib/libreoffice/share/registry/perdix.xcd \
+            etc/xdg/kritarc; do
     install -D -m 644 -- "$REPO_DIR/rootfs/$file" "$AIROOTFS/$file"
 done
 ln -sf /etc/systemd/system/perdix-restore.service \

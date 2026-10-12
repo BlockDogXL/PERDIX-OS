@@ -1,4 +1,4 @@
-# Office and drawing, opened from the desktop's Office / Drawing tiles and from My Files.
+# Office and drawing, opened from the desktop's Office / Çizim Stüdyosu tiles and from My Files.
 # LibreOffice: Writer, Calc, Impress, Draw; opens and saves .docx/.xlsx/.pptx and OpenDocument.
 libreoffice-fresh
 libreoffice-fresh-tr
@@ -7,7 +7,11 @@ hunspell-en_us
 # (Liberation covers Arial, Times New Roman and Courier New; it is in base.txt).
 ttf-carlito
 ttf-caladea
-# Krita: digital painting and image editing
+# Krita: digital painting and image editing (Çizim Stüdyosu). Its PERDIX defaults are in
+# rootfs/etc/xdg/kritarc. libmypaint powers Krita's MyPaint brush engine; mypaint-brushes adds
+# the MyPaint brush library.
 krita
+libmypaint
+mypaint-brushes
 # Brings an already open LibreOffice or Krita window back to the front from the desktop tile
 wmctrl
