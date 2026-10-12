@@ -87,6 +87,7 @@ xorg-xrandr
 openbox
 noto-fonts
 ttf-liberation
+adwaita-cursors
 # --- Graphics: Mesa + Vulkan, 64- and 32-bit (AMD, Intel; NVK for NVIDIA) ---
 mesa
 lib32-mesa
@@ -179,6 +180,9 @@ xset s off
 xset -dpms
 xset s noblank
 
+# PERDIX feather pointer (rootfs/usr/share/icons/PERDIX-Feather, made by tools/make-cursor-theme.py).
+export XCURSOR_THEME=PERDIX-Feather XCURSOR_SIZE=32
+
 # Pass DISPLAY to systemd --user and D-Bus (PipeWire, portals, Steam).
 for f in /etc/X11/xinit/xinitrc.d/?*.sh; do
     [ -x "$f" ] && . "$f"
@@ -211,6 +215,9 @@ printf 'VERSION="%s"\nEDITION="Live ISO"\n' "$(date +%Y.%m.%d)" >"$AIROOTFS/etc/
 
 # PERDIX Control Center system files: perdix-tune (root helper for the CPU governor, BBR and
 # QoS, run through pkexec), its polkit action, and /dev/uinput access for Macro Studio.
+# The PERDIX feather cursor theme (symlinks included).
+mkdir -p "$AIROOTFS/usr/share/icons"
+cp -a -- "$REPO_DIR/rootfs/usr/share/icons/PERDIX-Feather" "$AIROOTFS/usr/share/icons/"
 for file in usr/local/bin/perdix-tune \
             usr/share/polkit-1/actions/org.perdix.tune.policy \
             etc/udev/rules.d/60-perdix-uinput.rules \

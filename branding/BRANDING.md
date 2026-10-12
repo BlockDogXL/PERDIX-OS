@@ -52,3 +52,11 @@ Rules:
 | Login / lock screen | Not built yet: the kiosk logs in automatically. |
 
 After changing `piri-master.png`, run `python3 tools/make-brand-assets.py` and commit the results.
+
+## Cursor: PERDIX Feather
+
+`cursor/arrow_feather_cursor.cur` (32 px) and `cursor/arrow_feather_cursor_64.cur` (64 px) are the
+hollow neon-blue feather pointer (`#4BC9FF` lines). `python3 tools/make-cursor-theme.py` turns them
+into the Xcursor theme `rootfs/usr/share/icons/PERDIX-Feather` (24, 32 and 48 px; the tip at pixel
+0,0 is the hotspot). It replaces the arrow pointer only and inherits Adwaita for text, resize and
+busy cursors. PERDIX selects it with `XCURSOR_THEME=PERDIX-Feather` in `.xinitrc`.

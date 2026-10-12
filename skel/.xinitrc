@@ -1,6 +1,8 @@
 #!/bin/sh
 # No screen blanking, no DPMS: the shell decides when the screen sleeps.
 xset s off -dpms
+# PERDIX feather pointer (rootfs/usr/share/icons/PERDIX-Feather, made by tools/make-cursor-theme.py).
+export XCURSOR_THEME=PERDIX-Feather XCURSOR_SIZE=32
 # Pass DISPLAY/XAUTHORITY to systemd --user and D-Bus (portals, PipeWire, Steam).
 if [ -d /etc/X11/xinit/xinitrc.d ]; then
     for f in /etc/X11/xinit/xinitrc.d/?*.sh; do
