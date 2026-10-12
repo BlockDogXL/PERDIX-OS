@@ -37,3 +37,7 @@ pipewire-audio
 # Screen capture itself is plain X11 on PERDIX; the stream mix only needs PipeWire (base.txt).
 xdg-desktop-portal
 xdg-desktop-portal-gtk
+# Control Center "Camera & Mic": v4l2-ctl for camera formats and picture settings; ffmpeg reads
+# the camera for the preview (pw-record/wpctl for the microphone come with PipeWire).
+v4l-utils
+ffmpeg

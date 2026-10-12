@@ -23,6 +23,8 @@ Network & Sound
 Media
   Sharing              screen sharing on Xorg for Discord, OBS and browsers; "PERDIX Stream Mix", a
                        PipeWire virtual microphone carrying game sound + microphone; who records now
+  Camera & Mic         webcam preview at every resolution it offers, picture settings (v4l2-ctl);
+                       microphone level meter, gain up to 150 % (wpctl), record and play back
 System
   Task Manager         CPU, RAM and GPU use with history, running programs, End task / Kill;
                        hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
@@ -57,6 +59,7 @@ import argparse
 import configparser
 import math
 import os
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 
@@ -99,10 +102,9 @@ from PyQt5.QtWidgets import (
 )
 
 from kiosk_shell import __version__, paths
-from kiosk_shell.services import (audio, bluetooth, competitor, devices, diagnostics, hub_settings, hud, keywatch,
-                                  kilavuz,
-                                  macros, magnifier, mouse, network, perflog, region, sharing, taskman, theme, tuning,
-                                  vision)
+from kiosk_shell.services import (audio, bluetooth, camera, competitor, devices, diagnostics, hub_settings, hud,
+                                  keywatch, kilavuz, macros, magnifier, mictest, mouse, network, perflog, region,
+                                  sharing, taskman, theme, tuning, vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -381,6 +383,7 @@ NAV = [
     ("audio", "audio", "Audio", "Volume · EasyEffects", "Network & Sound"),
     ("bluetooth", "bluetooth", "Bluetooth", "Headsets · controllers", "Network & Sound"),
     ("sharing", "share", "Sharing", "Screen · stream mix", "Media"),
+    ("cammic", "camera", "Camera & Mic", "Preview · level · gain", "Media"),
     ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
     ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
     ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
@@ -440,6 +443,11 @@ def icon_path(kind: str) -> QPainterPath:
         for r in (12, 24):
             p.arcMoveTo(QRectF(20 - r, -8 - r, 2 * r, 2 * r), -50)
             p.arcTo(QRectF(20 - r, -8 - r, 2 * r, 2 * r), -50, 100)
+    elif kind == "camera":  # a webcam on a stand
+        p.addEllipse(QPointF(0, -8), 32, 32)
+        p.addEllipse(QPointF(0, -8), 12, 12)
+        p.moveTo(0, 24); p.lineTo(0, 34)
+        p.moveTo(-26, 40); p.lineTo(26, 40)
     elif kind == "globe":  # a globe with meridians
         p.addEllipse(QPointF(0, 0), 42, 42)
         p.addEllipse(QPointF(0, 0), 18, 42)
@@ -3992,6 +4000,521 @@ class SharingPage(QWidget):
             self._worker.wait()
 
 
+class PreviewThread(QThread):
+    """Runs ffmpeg on the camera and emits each frame as a QImage."""
+
+    frame = pyqtSignal(QImage)
+    failed = pyqtSignal(str)
+
+    def __init__(self, argv: list[str], size: tuple[int, int], parent=None) -> None:
+        super().__init__(parent)
+        self.argv, self.size = argv, size
+        self.process: subprocess.Popen | None = None
+        self.stopping = False
+
+    def run(self) -> None:
+        try:
+            self.process = subprocess.Popen(self.argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as error:
+            self.failed.emit(f"Could not start the preview: {error}")
+            return
+        w, h = self.size
+        need = w * h * 3
+        while not self.stopping:
+            data = self.process.stdout.read(need)
+            if len(data) < need:
+                break
+            self.frame.emit(QImage(data, w, h, w * 3, QImage.Format_RGB888).copy())
+        if not self.stopping:
+            message = self.process.stderr.read().decode(errors="replace").strip()
+            self.failed.emit("The camera is in use by another app." if "busy" in message
+                             else f"Preview stopped: {message.splitlines()[-1]}" if message else "Preview stopped.")
+        self.process.wait()
+
+    def stop(self) -> None:
+        self.stopping = True
+        if self.process is not None and self.process.poll() is None:
+            self.process.kill()
+        self.wait(3000)
+
+
+class MeterThread(QThread):
+    """Reads the microphone through pw-record and emits (peak dB, RMS dB) every 50 ms."""
+
+    level = pyqtSignal(float, float)
+
+    def __init__(self, target: str, parent=None) -> None:
+        super().__init__(parent)
+        self.target = target
+        self.process: subprocess.Popen | None = None
+        self.stopping = False
+
+    def run(self) -> None:
+        try:
+            self.process = mictest.start_meter(self.target)
+        except mictest.MicError:
+            return
+        import numpy as np  # loaded on first use, like the Vision page does
+        size = mictest.chunk_bytes()
+        while not self.stopping:
+            data = self.process.stdout.read(size)
+            if not data:
+                break
+            self.level.emit(*mictest.level_db(np.frombuffer(data[: len(data) // 2 * 2], dtype="<i2")))
+        self.process.wait()
+
+    def stop(self) -> None:
+        self.stopping = True
+        if self.process is not None and self.process.poll() is None:
+            self.process.kill()
+        self.wait(3000)
+
+
+class LevelMeter(QWidget):
+    """Horizontal level bar from -60 to 0 dBFS: quiet (ice), voice (orange), too loud (red), with a
+    peak marker that falls back slowly."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(30)
+        self.rms = self.peak = self.hold = mictest.SILENCE_DB
+
+    def set_level(self, peak: float, rms: float) -> None:
+        self.peak, self.rms = peak, rms
+        self.hold = max(peak, self.hold - 0.6)  # about 12 dB per second at 20 updates a second
+        self.update()
+
+    @staticmethod
+    def x_of(db: float, width: float) -> float:
+        return width * (max(mictest.SILENCE_DB, min(0.0, db)) - mictest.SILENCE_DB) / -mictest.SILENCE_DB
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        m = 12  # room for the scale's end labels
+        w, h = self.width() - 2 * m, self.height() - 12
+        p.translate(m, 0)
+        p.fillRect(QRectF(0, 0, w, h), qcolor(PANEL_2))
+        for start, end, color in ((-60, -20, ICE), (-20, -3, ORANGE), (-3, 0, DANGER)):
+            x1, x2 = self.x_of(start, w), self.x_of(min(end, self.peak), w)
+            if x2 > x1:
+                p.fillRect(QRectF(x1, 0, x2 - x1, h), qcolor(color, 0.85))
+        p.fillRect(QRectF(self.x_of(self.hold, w) - 1, 0, 2, h), qcolor(TEXT))
+        p.setPen(qcolor(MUTED))
+        font = QFont(p.font())
+        font.setPixelSize(10)
+        p.setFont(font)
+        for db in (-60, -40, -20, -10, -3, 0):
+            x = self.x_of(db, w)
+            p.drawLine(QPointF(x, h), QPointF(x, h + 3))
+            p.drawText(QRectF(x - 20, h + 1, 40, 12), Qt.AlignHCenter | Qt.AlignTop, str(db))
+
+
+class CameraMicPage(QWidget):
+    """Webcam preview, resolution and picture settings; microphone level, gain and a test recording."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: Worker | None = None
+        self._control_worker: Worker | None = None
+        self._mic_worker: Worker | None = None
+        self.preview_thread: PreviewThread | None = None
+        self.meter_thread: MeterThread | None = None
+        self.cameras: list[camera.Camera] = []
+        self.controls: list[camera.Control] = []
+        self.mics: list[audio.Device] = []
+        self._pending: dict[str, int] = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("cammic"), "Media", "Camera & Microphone",
+                                    "Check how you look and sound before you stream or join a call."))
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+
+        # --- camera ---
+        left = QVBoxLayout()
+        left.setSpacing(16)
+        cam = Card("Camera")
+        row = QHBoxLayout()
+        self.camera_combo = QComboBox()
+        self.camera_combo.currentIndexChanged.connect(self.camera_changed)
+        self.mode_combo = QComboBox()
+        self.mode_combo.currentIndexChanged.connect(self.mode_changed)
+        row.addWidget(self.camera_combo, 3)
+        row.addWidget(self.mode_combo, 2)
+        cam.body.addLayout(row)
+        w, h = camera.PREVIEW_SIZE
+        self.preview = QLabel("No preview", alignment=Qt.AlignCenter, objectName="Muted")
+        self.preview.setFixedSize(w, h)
+        self.preview.setStyleSheet("background: #000; border: 1px solid #222;")
+        cam.body.addWidget(self.preview, 0, Qt.AlignHCenter)
+        row = QHBoxLayout()
+        self.preview_button = primary_button("Start preview")
+        self.preview_button.clicked.connect(self.toggle_preview)
+        row.addWidget(self.preview_button)
+        row.addStretch(1)
+        cam.body.addLayout(row)
+        cam.body.addWidget(QLabel("Apps choose their own resolution when they open the camera; the list shows what "
+                                  "this camera can do. Picture settings stay on the camera for every app until it "
+                                  "is unplugged.", objectName="Muted", wordWrap=True))
+        self.camera_status = QLabel(objectName="Muted", wordWrap=True)
+        cam.body.addWidget(self.camera_status)
+        left.addWidget(cam)
+
+        self.picture = Card("Picture settings")
+        self.controls_box = QGridLayout()
+        self.controls_box.setHorizontalSpacing(12)
+        self.controls_box.setColumnStretch(1, 1)
+        self.picture.body.addLayout(self.controls_box)
+        self.defaults_button = button("Defaults")
+        self.defaults_button.clicked.connect(self.reset_controls)
+        self.picture.body.addWidget(self.defaults_button, 0, Qt.AlignLeft)
+        left.addWidget(self.picture)
+        left.addStretch(1)
+        columns.addLayout(left, 6)
+
+        # --- microphone ---
+        right = QVBoxLayout()
+        right.setSpacing(16)
+        mic = Card("Microphone")
+        self.mic_combo = QComboBox()
+        self.mic_combo.currentIndexChanged.connect(self.mic_changed)
+        mic.body.addWidget(self.mic_combo)
+        self.meter = LevelMeter()
+        mic.body.addWidget(self.meter)
+        self.peak_value = Readout("Peak", small=True)
+        self.advice = QLabel("Speak normally and watch the bar.", objectName="Muted", wordWrap=True)
+        row = QHBoxLayout()
+        row.addWidget(self.peak_value)
+        row.addWidget(self.advice, 1)
+        mic.body.addLayout(row)
+        self.gain = LabeledSlider("Gain", 0, int(mictest.MAX_GAIN * 100), 100,
+                                  lambda v: f"{v} %  ({mictest.gain_db(v / 100):+.1f} dB)" if v else "0 %  (muted)")
+        self.gain.valueChanged.connect(self.gain_changed)
+        mic.body.addWidget(self.gain)
+        self.record_button = button(f"Record {mictest.TEST_SECONDS} s and play back")
+        self.record_button.clicked.connect(self.record_sample)
+        mic.body.addWidget(self.record_button, 0, Qt.AlignLeft)
+        self.mic_status = QLabel(objectName="Muted", wordWrap=True)
+        mic.body.addWidget(self.mic_status)
+        right.addWidget(mic)
+        tips = Card("Good sound")
+        for text in ("Speaking normally, the peaks should reach the orange part and never the red.",
+                     "Above 100 % gain the sound is amplified in software, noise included: move closer first.",
+                     "For background noise, switch on Noise suppression in Audio."):
+            tips.body.addWidget(QLabel("·  " + text, objectName="Muted", wordWrap=True))
+        right.addWidget(tips)
+        right.addStretch(1)
+        columns.addLayout(right, 5)
+        layout.addLayout(columns, 1)
+
+        self._control_timer = QTimer(self, singleShot=True, interval=150, timeout=self.apply_controls)
+        self._gain_timer = QTimer(self, singleShot=True, interval=120, timeout=self.apply_gain)
+        self.update_buttons()
+
+    # --- loading ---
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.load()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self.stop_preview()
+        self.stop_meter()
+
+    def load(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+
+        def work():
+            try:
+                cams, cam_error = camera.cameras(), ""
+            except camera.CameraError as error:
+                cams, cam_error = [], str(error)
+            try:
+                mics, mic_error = audio.devices("Audio/Source"), ""
+            except audio.AudioError as error:
+                mics, mic_error = [], str(error)
+            return cams, cam_error, mics, mic_error
+        self._worker = Worker(work, self)
+        self._worker.done.connect(self.loaded)
+        self._worker.start()
+
+    def loaded(self, result) -> None:
+        if isinstance(result, Exception):
+            set_status(self.camera_status, str(result), False)
+            return
+        self.cameras, cam_error, self.mics, mic_error = result
+        keep = self.camera_combo.currentData()
+        self.camera_combo.blockSignals(True)
+        self.camera_combo.clear()
+        for c in self.cameras:
+            self.camera_combo.addItem(c.name, c.path)
+        index = self.camera_combo.findData(keep)
+        self.camera_combo.setCurrentIndex(max(0, index))
+        self.camera_combo.blockSignals(False)
+        if not self.cameras:
+            set_status(self.camera_status, cam_error or "No camera found. Plug in a USB webcam.", False)
+        self.camera_changed()
+
+        keep = self.mic_combo.currentData()
+        self.mic_combo.blockSignals(True)
+        self.mic_combo.clear()
+        for m in self.mics:
+            self.mic_combo.addItem(m.description + ("  (default)" if m.is_default else ""), m.name)
+        index = self.mic_combo.findData(keep)
+        self.mic_combo.setCurrentIndex(max(0, index))
+        self.mic_combo.blockSignals(False)
+        if not self.mics:
+            set_status(self.mic_status, mic_error or "No microphone found.", False)
+        self.mic_changed()
+
+    # --- camera ---
+
+    def current_camera(self) -> camera.Camera | None:
+        path = self.camera_combo.currentData()
+        return next((c for c in self.cameras if c.path == path), None)
+
+    def current_mode(self) -> camera.Mode | None:
+        cam = self.current_camera()
+        index = self.mode_combo.currentIndex()
+        return cam.modes[index] if cam and 0 <= index < len(cam.modes) else None
+
+    def camera_changed(self) -> None:
+        self.stop_preview()
+        cam = self.current_camera()
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.clear()
+        for mode in cam.modes if cam else []:
+            self.mode_combo.addItem(mode.label)
+        self.mode_combo.blockSignals(False)
+        self.load_controls()
+        self.update_buttons()
+
+    def mode_changed(self) -> None:
+        if self.preview_thread is not None:
+            self.stop_preview()
+            self.start_preview()
+
+    def update_buttons(self) -> None:
+        has_camera = self.current_camera() is not None
+        self.camera_combo.setEnabled(has_camera)
+        self.mode_combo.setEnabled(has_camera)
+        self.preview_button.setEnabled(has_camera)
+        self.preview_button.setText("Stop preview" if self.preview_thread is not None else "Start preview")
+        self.picture.setVisible(has_camera and bool(self.controls))
+        self.record_button.setEnabled(bool(self.mics) and not (self._mic_worker and self._mic_worker.isRunning()))
+        self.gain.setEnabled(bool(self.mics))
+
+    def toggle_preview(self) -> None:
+        if self.preview_thread is not None:
+            self.stop_preview()
+        else:
+            self.start_preview()
+
+    def start_preview(self, argv: list[str] | None = None) -> None:
+        cam, mode = self.current_camera(), self.current_mode()
+        if argv is None:
+            if cam is None or mode is None:
+                return
+            argv = camera.preview_command(cam.path, mode)
+        self.preview_thread = PreviewThread(argv, camera.PREVIEW_SIZE, self)
+        self.preview_thread.frame.connect(lambda image: self.preview.setPixmap(QPixmap.fromImage(image)))
+        self.preview_thread.failed.connect(self.preview_failed)
+        self.preview_thread.start()
+        set_status(self.camera_status, f"Preview at {mode.label}." if mode else "Preview running.", True)
+        self.update_buttons()
+
+    def preview_failed(self, message: str) -> None:
+        set_status(self.camera_status, message, False)
+        self.stop_preview()
+
+    def stop_preview(self) -> None:
+        if self.preview_thread is not None:
+            self.preview_thread.stop()
+            self.preview_thread = None
+            self.preview.clear()
+            self.preview.setText("No preview")
+        self.update_buttons()
+
+    def load_controls(self) -> None:
+        cam = self.current_camera()
+        if cam is None:
+            self.show_controls([])
+            return
+        try:
+            self.show_controls(camera.controls(cam.path))
+        except camera.CameraError as error:
+            self.show_controls([])
+            set_status(self.camera_status, str(error), False)
+
+    def show_controls(self, controls: list) -> None:
+        self.controls = controls
+        while self.controls_box.count():
+            item = self.controls_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for row, c in enumerate(controls):
+            self.controls_box.addWidget(QLabel(c.label), row, 0)
+            if c.kind == "bool":
+                widget = QCheckBox(cursor=Qt.PointingHandCursor, checked=bool(c.value))
+                widget.toggled.connect(lambda on, name=c.name: self.queue_control(name, int(on), reload=True))
+            elif c.menu:
+                widget = QComboBox()
+                for value, text in c.menu.items():
+                    widget.addItem(text, value)
+                widget.setCurrentIndex(max(0, widget.findData(c.value)))
+                widget.currentIndexChanged.connect(
+                    lambda _i, name=c.name, box=widget: self.queue_control(name, box.currentData(), reload=True))
+            else:
+                widget = QSlider(Qt.Horizontal, cursor=Qt.PointingHandCursor)
+                widget.setRange(c.minimum, c.maximum)
+                widget.setSingleStep(max(1, c.step))
+                widget.setValue(c.value)
+                value_label = QLabel(str(c.value), objectName="Value")
+                widget.valueChanged.connect(lambda v, label=value_label: label.setText(str(v)))
+                widget.valueChanged.connect(lambda v, name=c.name: self.queue_control(name, v))
+                self.controls_box.addWidget(value_label, row, 2)
+            widget.setObjectName(f"control:{c.name}")
+            widget.setEnabled(not c.inactive)
+            if c.inactive:
+                widget.setToolTip("Set by the camera's automatic mode")
+            self.controls_box.addWidget(widget, row, 1)
+        self.update_buttons()
+
+    def control_widget(self, name: str) -> QWidget | None:
+        return self.findChild(QWidget, f"control:{name}")
+
+    def queue_control(self, name: str, value: int, reload: bool = False) -> None:
+        self._pending[name] = value
+        self._reload_after = getattr(self, "_reload_after", False) or reload
+        self._control_timer.start()
+
+    def apply_controls(self) -> None:
+        cam = self.current_camera()
+        if cam is None or not self._pending:
+            return
+        if self._control_worker is not None and self._control_worker.isRunning():
+            self._control_timer.start()
+            return
+        pending, self._pending = self._pending, {}
+        reload, self._reload_after = getattr(self, "_reload_after", False), False
+
+        def work():
+            for name, value in pending.items():
+                camera.set_control(cam.path, name, value)
+            return camera.controls(cam.path) if reload else None
+        self._control_worker = Worker(work, self)
+        self._control_worker.done.connect(self.controls_applied)
+        self._control_worker.start()
+
+    def controls_applied(self, result) -> None:
+        if isinstance(result, Exception):
+            set_status(self.camera_status, str(result), False)
+        elif result is not None:  # an automatic mode changed: other settings may have (un)locked
+            self.show_controls(result)
+
+    def reset_controls(self) -> None:
+        cam = self.current_camera()
+        if cam is None:
+            return
+        try:
+            message = camera.reset_controls(cam.path, self.controls)
+            set_status(self.camera_status, message, "Not changed" not in message)
+        except camera.CameraError as error:
+            set_status(self.camera_status, str(error), False)
+        self.load_controls()
+
+    # --- microphone ---
+
+    def current_mic(self) -> audio.Device | None:
+        name = self.mic_combo.currentData()
+        return next((m for m in self.mics if m.name == name), None)
+
+    def mic_changed(self) -> None:
+        self.stop_meter()
+        mic = self.current_mic()
+        if mic is not None:
+            try:
+                volume = audio.get_volume(str(mic.id))
+                self.gain.slider.blockSignals(True)
+                self.gain.slider.setValue(round(volume.level * 100))
+                self.gain.readout.setText(self.gain._fmt(self.gain.value()))
+                self.gain.slider.blockSignals(False)
+            except audio.AudioError as error:
+                set_status(self.mic_status, str(error), False)
+            if self.isVisible():
+                self.start_meter(mic.name)
+        self.update_buttons()
+
+    def start_meter(self, target: str) -> None:
+        self.meter_thread = MeterThread(target, self)
+        self.meter_thread.level.connect(self.show_level)
+        self.meter_thread.start()
+
+    def stop_meter(self) -> None:
+        if self.meter_thread is not None:
+            self.meter_thread.stop()
+            self.meter_thread = None
+        self.meter.set_level(mictest.SILENCE_DB, mictest.SILENCE_DB)
+
+    def show_level(self, peak: float, rms: float) -> None:
+        self.meter.set_level(peak, rms)
+        self.peak_value.set(f"{self.meter.hold:.0f} dB" if self.meter.hold > mictest.SILENCE_DB else "—")
+        self.advice.setText(mictest.advice(self.meter.hold))
+
+    def gain_changed(self, _value: int) -> None:
+        self._gain_timer.start()
+
+    def apply_gain(self) -> None:
+        mic = self.current_mic()
+        if mic is None:
+            return
+        try:
+            mictest.set_gain(self.gain.value() / 100, str(mic.id))
+        except audio.AudioError as error:
+            set_status(self.mic_status, str(error), False)
+
+    def record_sample(self) -> None:
+        mic = self.current_mic()
+        if mic is None:
+            return
+        set_status(self.mic_status, f"Recording {mictest.TEST_SECONDS} seconds… speak now.", True)
+        self._mic_worker = Worker(lambda: mictest.record_sample(mic.name), self)
+        self._mic_worker.done.connect(self.recorded)
+        self._mic_worker.start()
+        self.update_buttons()
+
+    def recorded(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        if isinstance(result, Exception):
+            set_status(self.mic_status, str(result), False)
+            self.update_buttons()
+            return
+        set_status(self.mic_status, "Playing it back…", True)
+        self._mic_worker = Worker(lambda: mictest.play(result), self)
+        self._mic_worker.done.connect(self.played)
+        self._mic_worker.start()
+
+    def played(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        set_status(self.mic_status, str(result) if isinstance(result, Exception) else
+                   "That is how others hear you.", not isinstance(result, Exception))
+        self.update_buttons()
+
+    def shutdown(self) -> None:
+        self.stop_preview()
+        self.stop_meter()
+        for worker in (self._worker, self._control_worker, self._mic_worker):
+            if worker is not None and worker.isRunning():
+                worker.wait()
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -4242,7 +4765,8 @@ class HubWindow(QWidget):
              "vision": "VisionPage", "network": "NetworkPage", "wifi": "WifiPage", "audio": "AudioPage",
              "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage",
              "diagnostics": "DiagnosticsPage", "region": "RegionPage",
-             "bluetooth": "BluetoothPage", "sharing": "SharingPage"}
+             "bluetooth": "BluetoothPage", "sharing": "SharingPage",
+             "cammic": "CameraMicPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -4297,6 +4821,7 @@ class HubWindow(QWidget):
         self.region.shutdown()
         self.bluetooth.shutdown()
         self.sharing.shutdown()
+        self.cammic.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

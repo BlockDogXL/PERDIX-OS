@@ -152,6 +152,9 @@ pipewire-audio
 # Sharing: desktop portal for Flatpak apps and file dialogs
 xdg-desktop-portal
 xdg-desktop-portal-gtk
+# Camera & Mic: v4l2-ctl; ffmpeg for the camera preview (and the video cutter)
+v4l-utils
+ffmpeg
 clamav
 plymouth
 EOF
