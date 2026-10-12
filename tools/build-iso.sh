@@ -15,7 +15,8 @@
 #   archiso/                 profiledef, pacman.conf, boot loader configs, ISO-only airootfs files
 #   archiso/packages.*.txt   ISO-only packages (kernel, firmware, live-boot hooks)
 #   install/packages/*.txt   the same package lists the installer uses
-#   rootfs/                  system config shared with the installer (autologin, Xorg, polkit, ...)
+#   rootfs/                  system config shared with the installer (autologin, Xorg, polkit,
+#                            Plymouth theme, ...)
 #   skel/                    dotfiles for /home/kiosk
 #   shell/kiosk_shell        the PyQt5 shell, installed to /opt/kiosk-shell
 set -euo pipefail
@@ -103,6 +104,8 @@ assemble_profile() {
     mkdir -p -- "$profile/airootfs/opt/kiosk-shell"
     cp -a -- "$KIOSK_ROOT/shell/kiosk_shell" "$profile/airootfs/opt/kiosk-shell/"
     find "$profile/airootfs/opt/kiosk-shell" -name __pycache__ -prune -exec rm -rf -- {} +
+    # Shown on the desktop's About System page.
+    printf 'VERSION="%s"\nEDITION="Live ISO"\n' "$(date +%Y.%m.%d)" >"$profile/airootfs/etc/perdix-release"
 
     write_package_list
 

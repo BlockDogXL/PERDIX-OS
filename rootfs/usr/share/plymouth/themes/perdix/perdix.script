@@ -1,0 +1,99 @@
+# PERDIX OS boot / shutdown splash (Plymouth script theme).
+#
+# Boot:            white screen with the red-and-white Piri (Turkish flag colours), then a
+#                  fade to black where Piri glows orange and pulses until the desktop starts.
+# Shutdown/reboot: black screen with the glowing orange Piri.
+# Images are made by tools/make-brand-assets.py.
+
+screen_w = Window.GetWidth();
+screen_h = Window.GetHeight();
+
+RED_SECONDS = 1.5;
+FADE_SECONDS = 0.8;
+FPS = 50;                       # Plymouth calls the refresh function about 50 times a second
+DARK = 0.047;                   # background grey level of the dark screen (#0C0C0E)
+
+fun scaled(image, height) {
+    return image.Scale(image.GetWidth() * height / image.GetHeight(), height);
+}
+
+fun centred(image) {
+    sprite = Sprite(image);
+    sprite.SetX(screen_w / 2 - image.GetWidth() / 2);
+    sprite.SetY(screen_h / 2 - image.GetHeight() / 2);
+    return sprite;
+}
+
+red = centred(scaled(Image("piri-red.png"), screen_h * 0.40));
+# The glow image has transparent padding for the glow, so it is drawn larger.
+glow = centred(scaled(Image("piri-glow.png"), screen_h * 0.60));
+
+booting = (Plymouth.GetMode() == "boot");
+frame = 0;
+
+fun set_background(level) {     # level 1 = white, 0 = dark
+    grey = DARK + (1 - DARK) * level;
+    Window.SetBackgroundTopColor(grey, grey, grey);
+    Window.SetBackgroundBottomColor(grey, grey, grey);
+}
+
+fun refresh() {
+    frame = frame + 1;
+    seconds = frame / FPS;
+    if (booting && seconds < RED_SECONDS) {
+        set_background(1);
+        red.SetOpacity(1);
+        glow.SetOpacity(0);
+    } else if (booting && seconds < RED_SECONDS + FADE_SECONDS) {
+        t = (seconds - RED_SECONDS) / FADE_SECONDS;
+        set_background(1 - t);
+        red.SetOpacity(1 - t);
+        glow.SetOpacity(t);
+    } else {
+        set_background(0);
+        red.SetOpacity(0);
+        glow.SetOpacity(0.8 + 0.2 * Math.Sin(seconds * 2.5));   # slow neon pulse
+    }
+}
+Plymouth.SetRefreshFunction(refresh);
+
+# --- Messages (e.g. a filesystem check) -------------------------------------------------------
+
+message = Sprite();
+message.SetZ(10);
+
+fun show_message(text) {
+    image = Image.Text(text, 0.6, 0.6, 0.6);
+    message.SetImage(image);
+    message.SetX(screen_w / 2 - image.GetWidth() / 2);
+    message.SetY(screen_h * 0.88);
+}
+Plymouth.SetMessageFunction(show_message);
+
+# --- Password prompt (only used if the disk is ever encrypted) ---------------------------------
+
+prompt = Sprite();
+bullets = Sprite();
+prompt.SetZ(10);
+bullets.SetZ(10);
+
+fun show_password(text, count) {
+    label = Image.Text(text, 0.8, 0.8, 0.8);
+    prompt.SetImage(label);
+    prompt.SetX(screen_w / 2 - label.GetWidth() / 2);
+    prompt.SetY(screen_h * 0.80);
+    dots = "";
+    for (i = 0; i < count; i++) dots += "•";
+    stars = Image.Text(dots, 1, 0.42, 0.1);
+    bullets.SetImage(stars);
+    bullets.SetX(screen_w / 2 - stars.GetWidth() / 2);
+    bullets.SetY(screen_h * 0.80 + label.GetHeight() * 1.5);
+}
+
+fun hide_password() {
+    prompt.SetImage(Image.Text("", 0, 0, 0));
+    bullets.SetImage(Image.Text("", 0, 0, 0));
+}
+
+Plymouth.SetDisplayPasswordFunction(show_password);
+Plymouth.SetDisplayNormalFunction(hide_password);

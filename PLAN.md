@@ -101,7 +101,8 @@ UEFI
 1. `steps/60-silent-boot.sh`:
    - Kernel cmdline: `quiet splash loglevel=3 rd.udev.log_level=3
      systemd.show_status=auto vt.global_cursor_default=0`.
-   - Install `packages/boot.txt` (`plymouth`), add the `plymouth` hook to `mkinitcpio.conf`, set the
+   - Install `packages/boot.txt` (`plymouth`) and the **Piri theme** (`rootfs/usr/share/plymouth/themes/perdix`,
+     see `branding/BRANDING.md`), add the `plymouth` hook to `mkinitcpio.conf`, set the
      custom theme, regenerate the initramfs.
    - systemd-boot `loader.conf`: `timeout 0`, `console-mode keep`.
    - Leave `getty@tty2..6` alone: VT switching is disabled in Xorg instead (§Phase 6),
@@ -123,6 +124,9 @@ UEFI
    4. Gamepad navigation (`input/gamepad.py`, evdev → Qt key events).
    5. Settings: Wi-Fi (NetworkManager D-Bus), volume (`wpctl`), resolution (`xrandr`).
    6. [x] Power: `systemctl poweroff/reboot` (allowed by the polkit rule).
+   6b. [x] Branding: Piri (neon blue) in the centre, Piri icon top-left opening an
+       **About System** page (version from `/etc/perdix-release`, kernel, architecture,
+       CPU, GPU, memory).
    7. Optional: list installed Steam games by parsing `steamapps/*.acf` and launch
       them directly with `steam steam://rungameid/<appid>`.
 3. `kiosk-session` wraps the shell in a restart loop with crash back-off and logs
@@ -228,6 +232,7 @@ perdix-os/
 │   │   ├── input/              ← gamepad handling
 │   │   └── resources/          ← icons, themes (QSS)
 │   └── tests/
+├── branding/                   ← Piri logo master + generated variants, BRANDING.md
 ├── archiso/                    ← ISO profile (Phase 7), staged by tools/build-iso.sh
 │   ├── profiledef.sh           ← ISO name, boot modes, file ownership (kiosk = UID 1000)
 │   ├── pacman.conf             ← build-time repos, incl. [multilib]

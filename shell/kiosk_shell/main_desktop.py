@@ -1,7 +1,8 @@
 """PERDIX OS desktop: the full-screen home screen the kiosk boots into.
 
-Black and neon-blue interface with a large animated logo and four actions:
-Open Games (Steam), My Files, Antivirus Scan and Shut Down System.
+Black and neon-blue interface with Piri, the PERDIX mascot, glowing in the centre and
+four actions: Open Games (Steam), My Files, Antivirus Scan and Shut Down System. The
+Piri icon in the top-left corner opens the About System page.
 
 Kiosk behaviour: a frameless full-screen window that ignores close requests
 (Alt+F4, window-manager close, Ctrl+C) and goes back to full screen if it is
@@ -28,12 +29,12 @@ from PyQt5.QtCore import QDateTime, QDir, QEvent, QPointF, QRectF, Qt, QTimer, Q
 from PyQt5.QtGui import (
     QColor,
     QFont,
+    QImage,
     QKeySequence,
     QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
-    QPolygonF,
     QRadialGradient,
 )
 from PyQt5.QtWidgets import (
@@ -42,6 +43,7 @@ from PyQt5.QtWidgets import (
     QFileSystemModel,
     QFrame,
     QGraphicsDropShadowEffect,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListView,
@@ -57,6 +59,7 @@ from PyQt5.QtWidgets import (
 from kiosk_shell.config import load_config
 from kiosk_shell.services import power
 from kiosk_shell.services.antivirus import ScanResult, VirusScanner
+from kiosk_shell.services import system_info
 from kiosk_shell.services.launcher import AppLauncher
 
 DEV_MODE = os.environ.get("KIOSK_DEV") == "1"
@@ -68,6 +71,9 @@ NEON_WHITE = QColor("#c8f4ff")
 TEXT = QColor("#e6f7ff")
 MUTED = QColor("#5d7a8f")
 DANGER = QColor("#ff4d6d")
+PIRI_BELLY = QColor("#c8f4ff")  # Piri's light belly; its feather lines are NEON
+
+BRAND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "brand")
 
 # Everything is sized for 1080p and scaled to the actual screen height in main().
 _scale = 1.0
@@ -148,15 +154,37 @@ def stroke_neon(painter: QPainter, path: QPainterPath, color: QColor, width: flo
     painter.strokePath(path, QPen(with_alpha(NEON_WHITE, 0.8 * glow), width * 0.35, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
 
 
-def hexagon(center: QPointF, radius: float) -> QPainterPath:
-    points = [
-        QPointF(center.x() + radius * math.cos(math.radians(-90 + 60 * i)),
-                center.y() + radius * math.sin(math.radians(-90 + 60 * i)))
-        for i in range(6)
-    ]
-    path = QPainterPath()
-    path.addPolygon(QPolygonF(points + points[:1]))
-    return path
+def load_mask(name: str) -> QImage:
+    """White-on-transparent Piri mask from resources/brand (made by tools/make-brand-assets.py).
+    A missing file gives a null image; callers then just skip the logo."""
+    return QImage(os.path.join(BRAND_DIR, name)).convertToFormat(QImage.Format_ARGB32_Premultiplied)
+
+
+def tinted(mask: QImage, color: QColor, size: int) -> QImage:
+    """The mask scaled to fit size x size and filled with one colour."""
+    image = mask.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    painter = QPainter(image)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(image.rect(), color)
+    painter.end()
+    return image
+
+
+def glow_image(mask: QImage, color: QColor, size: int, softness: int) -> QImage:
+    """A soft glow around the mask: draw it on a padded canvas, then blur by halving and doubling."""
+    pad = size // 4
+    canvas = QImage(size + 2 * pad, size + 2 * pad, QImage.Format_ARGB32_Premultiplied)
+    canvas.fill(Qt.transparent)
+    painter = QPainter(canvas)
+    painter.drawImage(pad, pad, tinted(mask, color, size))
+    painter.end()
+    small, steps = canvas, 0
+    while small.width() > canvas.width() / softness and small.width() > 8:
+        small = small.scaled(small.width() // 2, small.height() // 2, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        steps += 1
+    for _ in range(steps):
+        small = small.scaled(small.width() * 2, small.height() * 2, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    return small.scaled(canvas.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
 
 def icon_path(kind: str) -> QPainterPath:
@@ -209,66 +237,149 @@ class Backdrop(QWidget):
             painter.drawLine(0, y, self.width(), y)
 
 
-class NeonLogo(QWidget):
-    """The PERDIX mark: a glowing hexagon with a 'P' monogram, gently pulsing."""
+class PiriLogo(QWidget):
+    """Piri, the PERDIX mascot, in neon blue with a slowly pulsing glow and a turning ring.
+
+    The layers are rendered once per size; each frame only blends finished images. The
+    animation runs only while the widget is visible and animation is enabled.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMinimumSize(px(260), px(260))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._strokes = load_mask("piri-strokes-mask.png")
+        self._silhouette = load_mask("piri-silhouette-mask.png")
+        self._rendered_size = 0
         self._phase = 0.0
-        self._timer = QTimer(self, interval=33, timeout=self._tick)
-        self._timer.start()
+        self._animated = True
+        self._timer = QTimer(self, interval=50, timeout=self._tick)
 
     def set_animated(self, animated: bool) -> None:
-        """Stop animating while a game runs so the shell uses no GPU/CPU in the background."""
-        self._timer.start() if animated else self._timer.stop()
+        """Stop animating while a game runs so the shell uses no CPU in the background."""
+        self._animated = animated
+        if animated and self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._animated:
+            self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
 
     def _tick(self) -> None:
-        self._phase = (self._phase + 0.033) % (2 * math.pi * 10)
+        self._phase = (self._phase + 0.05) % (2 * math.pi * 10)
         self.update()
+
+    def _render(self, size: int) -> None:
+        self._rendered_size = size
+        self._glow_wide = glow_image(self._silhouette, NEON_DEEP, size, 14)
+        self._glow_tight = glow_image(self._silhouette, NEON, size, 40)
+        self._art = tinted(self._silhouette, PIRI_BELLY, size)
+        painter = QPainter(self._art)
+        painter.drawImage(0, 0, tinted(self._strokes, NEON, size))
+        painter.end()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
         glow = 0.75 + 0.25 * math.sin(self._phase * 1.6)
         center = QPointF(self.width() / 2, self.height() / 2)
-        r = min(self.width(), self.height()) * 0.40
+        r = min(self.width(), self.height()) * 0.46
 
-        halo = QRadialGradient(center, r * 1.25)
-        halo.setColorAt(0.0, with_alpha(NEON_DEEP, 0.30 * glow))
+        halo = QRadialGradient(center, r * 1.15)
+        halo.setColorAt(0.0, with_alpha(NEON_DEEP, 0.28 * glow))
         halo.setColorAt(1.0, with_alpha(NEON_DEEP, 0.0))
         painter.setPen(Qt.NoPen)
         painter.setBrush(halo)
-        painter.drawEllipse(center, r * 1.25, r * 1.25)
+        painter.drawEllipse(center, r * 1.15, r * 1.15)
 
-        stroke_neon(painter, hexagon(center, r), NEON, max(2.0, r * 0.028), glow)
-
-        # Slowly turning dashed ring between the two hexagons.
+        # Slowly turning dashed ring around Piri.
         painter.save()
         painter.translate(center)
         painter.rotate(math.degrees(self._phase * 0.15))
-        ring = QPen(with_alpha(NEON, 0.55), max(1.0, r * 0.012))
+        ring = QPen(with_alpha(NEON, 0.45), max(1.0, r * 0.012))
         ring.setDashPattern([2, 6])
         painter.setPen(ring)
         painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(QPointF(0, 0), r * 0.80, r * 0.80)
+        painter.drawEllipse(QPointF(0, 0), r, r)
         painter.restore()
 
-        inner = r * 0.62
-        stroke_neon(painter, hexagon(center, inner), NEON_DEEP, max(1.0, r * 0.012), glow * 0.7)
+        if self._strokes.isNull() or self._silhouette.isNull():
+            return  # brand resources missing: show the ring only rather than crash
+        size = int(r * 1.45)
+        if size != self._rendered_size:
+            self._render(size)
 
-        # 'P' monogram: stem, then a bowl closing back onto the stem.
-        stem_x = center.x() - 0.28 * inner
-        top, bottom = center.y() - 0.50 * inner, center.y() + 0.50 * inner
-        bowl = 0.26 * inner
-        bowl_x = center.x() + 0.02 * inner
-        monogram = QPainterPath(QPointF(stem_x, bottom))
-        monogram.lineTo(stem_x, top)
-        monogram.lineTo(bowl_x, top)
-        monogram.arcTo(QRectF(bowl_x - bowl, top, 2 * bowl, 2 * bowl), 90, -180)
-        monogram.lineTo(stem_x, top + 2 * bowl)
-        stroke_neon(painter, monogram, NEON, max(2.0, r * 0.05), glow)
+        def draw_centred(image: QImage, opacity: float) -> None:
+            painter.setOpacity(opacity)
+            painter.drawImage(QPointF(center.x() - image.width() / 2, center.y() - image.height() / 2), image)
+
+        draw_centred(self._glow_wide, 0.9 * glow)
+        draw_centred(self._glow_tight, 0.7 * glow)
+        draw_centred(self._art, 1.0)
+        painter.setOpacity(1.0)
+
+
+class BrandButton(QPushButton):
+    """Top-left Piri icon and wordmark. Opens About System, like a start-menu button."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._mask = load_mask("piri-silhouette-mask.png")
+        self._icons: dict[str, QImage] = {}
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setToolTip("About this system")
+        self.setFixedSize(px(230), px(64))
+
+    def _icon(self, color: QColor) -> QImage:
+        if color.name() not in self._icons:
+            self._icons[color.name()] = tinted(self._mask, color, px(40))
+        return self._icons[color.name()]
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self.update()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.animateClick()
+        else:
+            super().keyPressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        lit = self.underMouse() or self.hasFocus()
+        if lit:
+            shape = QPainterPath()
+            shape.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), px(14), px(14))
+            painter.fillPath(shape, with_alpha(NEON, 0.10))
+            painter.strokePath(shape, QPen(with_alpha(NEON, 0.8), px(2)))
+        color = NEON if lit else TEXT
+        x = px(12)
+        if not self._mask.isNull():
+            icon = self._icon(color)
+            painter.drawImage(x, (self.height() - icon.height()) // 2, icon)
+            x += icon.width() + px(14)
+        font = QFont(self.font())
+        font.setPixelSize(px(20))
+        font.setWeight(QFont.DemiBold)
+        font.setLetterSpacing(QFont.AbsoluteSpacing, px(7))
+        painter.setFont(font)
+        painter.setPen(color if lit else MUTED)
+        painter.drawText(QRectF(x, 0, self.width() - x, self.height()), Qt.AlignLeft | Qt.AlignVCenter, "PERDIX")
 
 
 class NeonButton(QPushButton):
@@ -428,8 +539,8 @@ class HomePage(QWidget):
         layout.setSpacing(0)
 
         top = QHBoxLayout()
-        brand = spaced_label("PERDIX", 18, 8, QFont.DemiBold, "Muted")
-        top.addWidget(brand, 0, Qt.AlignLeft | Qt.AlignTop)
+        self.brand_button = BrandButton()
+        top.addWidget(self.brand_button, 0, Qt.AlignLeft | Qt.AlignTop)
         top.addStretch(1)
         clock_box = QVBoxLayout()
         clock_box.setSpacing(0)
@@ -440,7 +551,7 @@ class HomePage(QWidget):
         top.addLayout(clock_box)
         layout.addLayout(top)
 
-        self.logo = NeonLogo()
+        self.logo = PiriLogo()
         layout.addWidget(self.logo, 6)
         wordmark = spaced_label("PERDIX", 76, 26, QFont.Light)
         glow(wordmark, 50)
@@ -631,6 +742,87 @@ class ScanPage(QWidget):
             super().keyPressEvent(event)
 
 
+class AboutPage(QWidget):
+    """About System: large Piri with its signature, and the system's version and hardware."""
+
+    ROWS = ("Version", "Edition", "Kernel", "Architecture", "Processor", "Graphics", "Memory", "Desktop")
+
+    def __init__(self, on_back, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._on_back = on_back
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(px(56), px(40), px(56), px(40))
+        layout.setSpacing(px(18))
+        back = flat_button("Back to Desktop")
+        back.clicked.connect(on_back)
+        layout.addLayout(page_header("About System", back))
+
+        body = QHBoxLayout()
+        body.setSpacing(px(64))
+        mascot = QVBoxLayout()
+        mascot.setSpacing(px(12))
+        self.logo = PiriLogo()
+        self.logo.setMinimumSize(px(460), px(460))
+        mascot.addWidget(self.logo, 1)
+        signature = QLabel("Piri  ·  <i>Perdix perdix</i>", objectName="Muted", alignment=Qt.AlignCenter)
+        mascot.addWidget(signature)
+        body.addLayout(mascot, 5)
+
+        details = QVBoxLayout()
+        details.setSpacing(px(6))  # child layouts otherwise inherit body's 64 px spacing
+        details.addStretch(1)
+        name = spaced_label("PERDIX", 72, 22, QFont.Light)
+        subtitle = spaced_label("OPERATING  SYSTEM", 16, 10, QFont.Normal, "Muted")
+        for label in (name, subtitle):
+            label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            details.addWidget(label)
+        glow(name, 40)
+        details.addSpacing(px(36))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(px(36))
+        grid.setVerticalSpacing(px(14))
+        self.values: dict[str, QLabel] = {}
+        for row, title in enumerate(self.ROWS):
+            label = QLabel(title, objectName="Muted", alignment=Qt.AlignLeft | Qt.AlignTop)
+            value = QLabel(system_info.UNKNOWN, alignment=Qt.AlignLeft | Qt.AlignTop)
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.NoTextInteraction)
+            grid.addWidget(label, row, 0)
+            grid.addWidget(value, row, 1)
+            self.values[title] = value
+        grid.setColumnStretch(1, 1)
+        details.addLayout(grid)
+        details.addStretch(2)
+        body.addLayout(details, 6)
+        layout.addLayout(body, 1)
+
+    def refresh(self) -> None:
+        info = system_info.collect()
+        values = {
+            "Version": info.version,
+            "Edition": info.edition,
+            "Kernel": info.kernel,
+            "Architecture": info.architecture,
+            "Processor": info.processor,
+            "Graphics": "\n".join(info.graphics) or system_info.UNKNOWN,
+            "Memory": info.memory,
+            "Desktop": f"PERDIX Desktop {info.desktop}",
+        }
+        for title, text in values.items():
+            self.values[title].setText(text)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh()  # cheap (reads /proc and runs lspci once), and stays current
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self._on_back()
+        else:
+            super().keyPressEvent(event)
+
+
 class ShutdownOverlay(QWidget):
     """Dimmed full-window confirmation: Shut Down / Restart / Cancel."""
 
@@ -711,8 +903,9 @@ class MainDesktop(Backdrop):
         self.home = HomePage()
         self.files = FilesPage(self.show_home)
         self.scan = ScanPage(self.scanner, self.show_home)
+        self.about = AboutPage(self.show_home)
         self.pages = QStackedWidget()
-        for page in (self.home, self.files, self.scan):
+        for page in (self.home, self.files, self.scan, self.about):
             self.pages.addWidget(page)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -723,6 +916,7 @@ class MainDesktop(Backdrop):
         self.home.files_button.clicked.connect(lambda: self.pages.setCurrentWidget(self.files))
         self.home.scan_button.clicked.connect(lambda: self.pages.setCurrentWidget(self.scan))
         self.home.power_button.clicked.connect(self.overlay.open)
+        self.home.brand_button.clicked.connect(lambda: self.pages.setCurrentWidget(self.about))
 
         self.steam.started.connect(self._steam_started)
         self.steam.finished.connect(self._steam_finished)

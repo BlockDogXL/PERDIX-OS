@@ -4,6 +4,8 @@
 # Builds a live ISO from Arch's "releng" profile that boots silently and logs the
 # unprivileged "kiosk" user straight into the PyQt5 desktop
 # (shell/kiosk_shell/main_desktop.py), with Steam and Mesa/Vulkan preinstalled.
+# From the repository it copies only the desktop (shell/kiosk_shell) and the boot
+# splash theme (rootfs/usr/share/plymouth/themes/perdix); everything else is inline.
 #
 # Usage:   sudo ./build_iso.sh [--nvidia]
 #          --nvidia  add NVIDIA's proprietary driver (GTX 16xx / RTX 20xx and newer)
@@ -41,6 +43,8 @@ command -v mkarchiso >/dev/null || die "archiso is not installed: pacman -S arch
 archiso_version="$(pacman -Q archiso | cut -d' ' -f2)"
 (( $(vercmp "$archiso_version" 86) >= 0 )) || die "archiso $archiso_version is too old, need 86+: pacman -Syu archiso"
 [[ -f $REPO_DIR/shell/kiosk_shell/main_desktop.py ]] || die "shell/kiosk_shell/main_desktop.py not found next to this script"
+PLYMOUTH_THEME="$REPO_DIR/rootfs/usr/share/plymouth/themes/perdix"
+[[ -f $PLYMOUTH_THEME/perdix.script ]] || die "Plymouth theme not found in $PLYMOUTH_THEME"
 
 msg "Starting PERDIX OS ISO build..."
 
@@ -196,6 +200,9 @@ mkdir -p "$AIROOTFS/opt/kiosk-shell"
 cp -r -- "$REPO_DIR/shell/kiosk_shell" "$AIROOTFS/opt/kiosk-shell/"
 find "$AIROOTFS/opt/kiosk-shell" -name __pycache__ -prune -exec rm -rf -- {} +
 
+# Shown on the desktop's About System page.
+printf 'VERSION="%s"\nEDITION="Live ISO"\n' "$(date +%Y.%m.%d)" >"$AIROOTFS/etc/perdix-release"
+
 # --- Lockdown ---------------------------------------------------------------------------------
 mkdir -p "$AIROOTFS/etc/X11/xorg.conf.d" "$AIROOTFS/etc/polkit-1/rules.d" "$AIROOTFS/etc/sysctl.d"
 cat >"$AIROOTFS/etc/X11/xorg.conf.d/10-kiosk.conf" <<'EOF'
@@ -239,7 +246,10 @@ EOF
 
 # --- Silent boot ------------------------------------------------------------------------------
 msg "Configuring silent boot..."
-# Plymouth splash in the initramfs.
+# Plymouth splash with the Piri theme (red-and-white, then orange glow), in the initramfs.
+mkdir -p "$AIROOTFS/usr/share/plymouth/themes" "$AIROOTFS/etc/plymouth"
+cp -r -- "$PLYMOUTH_THEME" "$AIROOTFS/usr/share/plymouth/themes/"
+cp -- "$REPO_DIR/rootfs/etc/plymouth/plymouthd.conf" "$AIROOTFS/etc/plymouth/plymouthd.conf"
 sed -i '/^HOOKS=/ s/\bkms\b/kms plymouth/' "$AIROOTFS/etc/mkinitcpio.conf.d/archiso.conf"
 grep -q '^HOOKS=.*plymouth' "$AIROOTFS/etc/mkinitcpio.conf.d/archiso.conf" || die "could not add the plymouth hook"
 # Quiet kernel command line on every boot entry.
