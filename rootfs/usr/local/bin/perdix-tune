@@ -8,18 +8,51 @@ every argument is validated here and commands are run without a shell.
   perdix-tune tcp <bbr|cubic|reno>
   perdix-tune qos on <interface> <download-limit-mbit> <udp-ports>   e.g. 27015-27050,7000-8000
   perdix-tune qos off <interface>
+  perdix-tune services <pause|resume>        background services/timers during game mode
+  perdix-tune gpu <auto|performance|powersave>
+  perdix-tune game-mode <on|off>              record Competitor Mode's state
+  perdix-tune hud <orange|white> <top-left|bottom-right>   record the PERDIX HUD theme
+  perdix-tune restore                         re-apply saved settings (perdix-restore.service)
+
+Every change is recorded in /etc/perdix/perdix.conf (game mode, network, HUD) or
+/etc/perdix/drivers.conf (GPU profile); game-mode actions are logged to
+/var/log/perdix/game_mode.log.
 """
 
+import configparser
+import glob
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime
+
+CONF_DIR = "/etc/perdix"
+LOG_DIR = "/var/log/perdix"
+RUN_DIR = "/run/perdix"
+SYSFS_DRM = "/sys/class/drm"
 
 GOVERNORS = ("performance", "powersave", "schedutil", "ondemand", "conservative")
 TCP_ALGORITHMS = {"bbr": "fq", "cubic": "fq_codel", "reno": "fq_codel"}  # algorithm -> default qdisc
 IFACE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 MAX_RANGES = 16
+HUD_COLORS = ("orange", "white")
+HUD_POSITIONS = ("top-left", "bottom-right")
+# GPU profile -> amdgpu power_dpm_force_performance_level
+GPU_PROFILES = {"auto": "auto", "performance": "high", "powersave": "low"}
+# Background work paused while game mode is on (only those that are running are touched).
+PAUSABLE_UNITS = (
+    "clamav-freshclam.service",       # virus definition downloads
+    "man-db.timer",                   # man page index rebuild
+    "shadow.timer",                   # password database check
+    "archlinux-keyring-wkd-sync.timer",
+    "fstrim.timer",
+    "plocate-updatedb.timer",
+    "paccache.timer",
+    "reflector.timer",
+)
 
 
 class UsageError(Exception):
@@ -115,6 +148,104 @@ def qos_on_commands(iface: str, limit_mbit: int, ports: list[tuple[int, int]]) -
     return commands
 
 
+# --- records and logs -----------------------------------------------------------------------------
+
+def conf_path(name: str) -> str:
+    return os.path.join(CONF_DIR, name)
+
+
+def read_conf(name: str) -> configparser.ConfigParser:
+    conf = configparser.ConfigParser()
+    conf.read(conf_path(name), encoding="utf-8")
+    return conf
+
+
+def record(name: str, section: str, values: dict[str, str]) -> None:
+    """Update keys in /etc/perdix/<name> (INI), keeping everything else."""
+    conf = read_conf(name)
+    if not conf.has_section(section):
+        conf.add_section(section)
+    for key, value in values.items():
+        conf.set(section, key, value)
+    os.makedirs(CONF_DIR, exist_ok=True)
+    tmp = conf_path(name) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(f"# PERDIX OS {name}: written by perdix-tune (PERDIX Control Center). Applied at boot by\n"
+                "# perdix-restore.service. Edit with care: values are validated when read.\n\n")
+        conf.write(f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, conf_path(name))
+
+
+def log(name: str, message: str) -> None:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(os.path.join(LOG_DIR, name), "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')} {message}\n")
+
+
+# --- game mode: background services, GPU profile -----------------------------------------------------
+
+def pause_services() -> list[str]:
+    """Stop the pausable units that are running; remember them for resume_services()."""
+    stopped = []
+    for unit in PAUSABLE_UNITS:
+        if subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0:
+            if subprocess.run(["systemctl", "stop", unit], capture_output=True).returncode == 0:
+                stopped.append(unit)
+    os.makedirs(RUN_DIR, exist_ok=True)
+    with open(os.path.join(RUN_DIR, "paused-units"), "a", encoding="utf-8") as f:
+        f.writelines(unit + "\n" for unit in stopped)
+    log("game_mode.log", "game mode: stopped " + (", ".join(stopped) if stopped else "nothing (no background services running)"))
+    return stopped
+
+
+def resume_services() -> list[str]:
+    path = os.path.join(RUN_DIR, "paused-units")
+    try:
+        with open(path, encoding="utf-8") as f:
+            units = [u for u in dict.fromkeys(line.strip() for line in f) if u in PAUSABLE_UNITS]
+    except FileNotFoundError:
+        units = []
+    started = [u for u in units if subprocess.run(["systemctl", "start", u], capture_output=True).returncode == 0]
+    if os.path.exists(path):
+        os.remove(path)
+    log("game_mode.log", "game mode: restarted " + (", ".join(started) if started else "nothing"))
+    return started
+
+
+def gpu_level_files() -> list[str]:
+    """amdgpu cards that accept a forced performance level (Intel and NVIDIA have no such knob)."""
+    return sorted(glob.glob(os.path.join(SYSFS_DRM, "card[0-9]*", "device", "power_dpm_force_performance_level")))
+
+
+def set_gpu_profile(profile: str) -> list[str]:
+    if profile not in GPU_PROFILES:
+        raise UsageError(f"unknown GPU profile: {profile!r}")
+    cards = []
+    for path in gpu_level_files():
+        with open(path, "w", encoding="ascii") as f:
+            f.write(GPU_PROFILES[profile])
+        cards.append(path.split(os.sep)[-3])
+    if not cards:
+        raise RuntimeError("no GPU with an adjustable power profile (supported: AMD amdgpu)")
+    return cards
+
+
+# --- network: default interface for restore -------------------------------------------------------------
+
+def default_interface(wait: float = 0) -> str:
+    deadline = time.monotonic() + wait
+    while True:
+        out = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            fields = line.split()
+            if fields[:1] == ["default"] and "dev" in fields:
+                return fields[fields.index("dev") + 1]
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(2)
+
+
 def plan(args: list[str]) -> tuple[list[list[str]], list[list[str]]]:
     """(commands that must succeed, best-effort commands run first whose errors are ignored)"""
     match args:
@@ -130,22 +261,92 @@ def plan(args: list[str]) -> tuple[list[list[str]], list[list[str]]]:
     raise UsageError(__doc__.split("\n\n", 2)[2])
 
 
-def main(argv: list[str]) -> int:
-    try:
-        commands, cleanup = plan(argv)
-    except UsageError as error:
-        print(f"perdix-tune: {error}", file=sys.stderr)
-        return 2
+def run_plan(commands: list[list[str]], cleanup: list[list[str]]) -> str:
+    """Run the commands; returns '' on success or an error message."""
     for command in cleanup:
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for command in commands:
         if shutil.which(command[0]) is None:
-            print(f"perdix-tune: {command[0]} is not installed", file=sys.stderr)
-            return 1
+            return f"{command[0]} is not installed"
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"perdix-tune: {' '.join(command)}: {result.stderr.strip()}", file=sys.stderr)
-            return 1
+            return f"{' '.join(command)}: {result.stderr.strip()}"
+    return ""
+
+
+def restore() -> list[str]:
+    """Re-apply saved network and GPU settings after boot. Returns problems (empty = fine)."""
+    problems = []
+    conf, drivers = read_conf("perdix.conf"), read_conf("drivers.conf")
+    record("perdix.conf", "game_mode", {"competitor": "off"})  # a new boot ends any game-mode session
+    tcp = conf.get("network", "tcp", fallback="")
+    if tcp in TCP_ALGORITHMS:
+        if error := run_plan(*tcp_commands(tcp)):
+            problems.append(error)
+    if conf.get("network", "qos", fallback="off") == "on":
+        try:
+            limit = parse_limit(conf.get("network", "download_limit_mbit", fallback=""))
+            ports = parse_ports(conf.get("network", "game_ports", fallback=""))
+            iface = default_interface(wait=60)
+            if not iface:
+                raise UsageError("no network connection within 60 s")
+            if error := run_plan(qos_on_commands(check_iface(iface), limit, ports), qos_off_commands(iface)):
+                problems.append(error)
+        except UsageError as error:
+            problems.append(f"QoS not restored: {error}")
+    profile = drivers.get("gpu", "profile", fallback="auto")
+    if profile in GPU_PROFILES and profile != "auto":
+        try:
+            set_gpu_profile(profile)
+        except (RuntimeError, OSError) as error:
+            problems.append(f"GPU profile not restored: {error}")
+    return problems
+
+
+def main(argv: list[str]) -> int:
+    try:
+        match argv:
+            case ["services", "pause" | "resume" as action]:
+                pause_services() if action == "pause" else resume_services()
+                return 0
+            case ["gpu", profile]:
+                cards = set_gpu_profile(profile)
+                record("drivers.conf", "gpu", {"profile": profile, "cards": " ".join(cards)})
+                log("game_mode.log", f"GPU profile: {profile} ({', '.join(cards)})")
+                return 0
+            case ["game-mode", "on" | "off" as state]:
+                record("perdix.conf", "game_mode", {"competitor": state})
+                log("game_mode.log", f"competitor mode {state}")
+                return 0
+            case ["hud", color, position]:
+                if color not in HUD_COLORS or position not in HUD_POSITIONS:
+                    raise UsageError(f"unknown HUD theme: {color!r} {position!r}")
+                record("perdix.conf", "hud", {"color": color, "position": position})
+                return 0
+            case ["restore"]:
+                for problem in restore():
+                    print(f"perdix-tune: {problem}", file=sys.stderr)
+                return 0
+        commands, cleanup = plan(argv)
+    except UsageError as error:
+        print(f"perdix-tune: {error}", file=sys.stderr)
+        return 2
+    except (RuntimeError, OSError) as error:
+        print(f"perdix-tune: {error}", file=sys.stderr)
+        return 1
+    if error := run_plan(commands, cleanup):
+        print(f"perdix-tune: {error}", file=sys.stderr)
+        return 1
+    match argv:  # record what was applied
+        case ["governor", governor]:
+            record("perdix.conf", "game_mode", {"governor": governor})
+            log("game_mode.log", f"CPU governor: {governor}")
+        case ["tcp", algorithm]:
+            record("perdix.conf", "network", {"tcp": algorithm})
+        case ["qos", "on", _iface, limit, ports]:
+            record("perdix.conf", "network", {"qos": "on", "download_limit_mbit": limit, "game_ports": ports})
+        case ["qos", "off", _iface]:
+            record("perdix.conf", "network", {"qos": "off"})
     return 0
 
 

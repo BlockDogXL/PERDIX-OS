@@ -174,6 +174,11 @@ def install_user(theme_dir: Path, theme: str) -> list[str]:
         default.parent.mkdir(parents=True, exist_ok=True)
         default.write_text(f"[Icon Theme]\nInherits={theme}\n")
         notes.append(f"Set as the default cursor theme in {default}")
+    # PERDIX OS reads the user's cursor choice from here at login (.xinitrc).
+    prefs = Path.home() / ".config" / "perdix-os" / "cursor.conf"
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    prefs.write_text(f"# Cursor preference, read by ~/.xinitrc at login.\nXCURSOR_THEME={theme}\nXCURSOR_SIZE=32\n")
+    notes.append(f"Saved as your PERDIX cursor preference in {prefs}")
     return notes
 
 

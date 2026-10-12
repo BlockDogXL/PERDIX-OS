@@ -10,7 +10,9 @@ import string
 import time
 from dataclasses import asdict, dataclass, field
 
-MACROS_PATH = os.path.expanduser("~/.config/perdix/macros.json")
+from kiosk_shell import paths
+
+MACROS_PATH = paths.MACROS
 STEP_KINDS = ("key", "text", "delay")
 MAX_DELAY_MS = 60_000
 

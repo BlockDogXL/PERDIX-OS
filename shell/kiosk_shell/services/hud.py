@@ -9,6 +9,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
+from kiosk_shell import paths
+
 MANGOHUD_CONFIG = os.path.expanduser("~/.config/MangoHud/MangoHud.conf")
 LAUNCH_OPTIONS = "gamemoderun mangohud %command%"
 HEADER = "# PERDIX HUD: options below are managed by PERDIX Control Center (Game Mode & HUD)."
@@ -46,6 +48,7 @@ class HudSettings:
     font_size: int = 20
     background_alpha: float = 0.4
     toggle_key: str = "Shift_R+F12"
+    record_perf: bool = True  # MangoHud logs each session for /var/log/perdix/perf.log
     metrics: dict[str, bool] = field(default_factory=lambda: {m: m in DEFAULT_METRICS for m in METRICS})
 
     def __post_init__(self) -> None:
@@ -68,11 +71,15 @@ def layout_options(settings: HudSettings) -> dict[str, str]:
         "toggle_hud": settings.toggle_key,
     }
     options.update({name: str(int(bool(settings.metrics.get(name)))) for name in METRICS})
+    # Session logs for perf.log: start logging 5 s after the game starts, into the PERDIX log folder.
+    options["output_folder"] = paths.MANGOHUD_LOG_DIR if settings.record_perf else None
+    options["autostart_log"] = "5" if settings.record_perf else None
     return options
 
 
-def update_config(changes: dict[str, str], path: str = MANGOHUD_CONFIG) -> str:
-    """Set `key=value` for each change in the MangoHud config, keeping all other lines."""
+def update_config(changes: dict[str, str | None], path: str = MANGOHUD_CONFIG) -> str:
+    """Set `key=value` for each change in the MangoHud config (None removes the key), keeping
+    all other lines."""
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
@@ -81,11 +88,16 @@ def update_config(changes: dict[str, str], path: str = MANGOHUD_CONFIG) -> str:
     if HEADER not in lines:
         lines.insert(0, HEADER)
     remaining = dict(changes)
-    for i, line in enumerate(lines):
+    kept = []
+    for line in lines:
         key = line.split("=", 1)[0].strip()
-        if not line.lstrip().startswith("#") and key in remaining:
-            lines[i] = f"{key}={remaining.pop(key)}"
-    lines += [f"{key}={value}" for key, value in remaining.items()]
+        if not line.lstrip().startswith("#") and key in changes:
+            value = remaining.pop(key, None)
+            if value is not None:
+                kept.append(f"{key}={value}")
+            continue  # removed, or a duplicate of a key already written
+        kept.append(line)
+    lines = kept + [f"{key}={value}" for key, value in remaining.items() if value is not None]
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:

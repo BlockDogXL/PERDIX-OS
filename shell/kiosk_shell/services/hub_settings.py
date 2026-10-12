@@ -1,13 +1,15 @@
-"""PERDIX Control Center settings, stored as JSON in ~/.config/perdix/hub.json.
+"""PERDIX Control Center settings, stored as JSON in ~/.config/perdix-os/settings.json.
 
-Sections: "mouse" (device, speed, flat), "crosshair" and "hud". Unknown or broken
+Sections: "mouse", "crosshair", "zoom", "hud" and "network". Unknown or broken
 content falls back to defaults instead of stopping the hub from starting.
 """
 
 import json
 import os
 
-HUB_SETTINGS_PATH = os.path.expanduser("~/.config/perdix/hub.json")
+from kiosk_shell import paths
+
+HUB_SETTINGS_PATH = paths.SETTINGS
 
 
 def load(path: str = HUB_SETTINGS_PATH) -> dict:

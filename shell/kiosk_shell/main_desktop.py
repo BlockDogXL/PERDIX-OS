@@ -1,8 +1,9 @@
 """PERDIX OS desktop: the full-screen home screen the kiosk boots into.
 
 Black and neon-blue interface with Piri, the PERDIX mascot, glowing in the centre and
-four actions: Open Games (Steam), My Files, Antivirus Scan and Shut Down System. The
-Piri icon in the top-left corner opens the About System page.
+five actions: Open Games (Steam), My Files, Antivirus Scan, Control Center (the PERDIX
+Control Center, perdix_hub.py) and Shut Down System. The Piri icon in the top-left corner
+opens the About System page. The neon colour comes from ~/.config/perdix-os/theme.json.
 
 Kiosk behaviour: a frameless full-screen window that ignores close requests
 (Alt+F4, window-manager close, Ctrl+C) and goes back to full screen if it is
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import math
 import os
+import shlex
 import signal
 import sys
 
@@ -56,16 +58,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from kiosk_shell.config import load_config, read_shell_vars
+from kiosk_shell.config import load_config
 from kiosk_shell.services import power
 from kiosk_shell.services.antivirus import ScanResult, VirusScanner
-from kiosk_shell.services import competitor, system_info
+from kiosk_shell.services import competitor, perflog, system_info, theme
 from kiosk_shell.services.launcher import AppLauncher
 
 DEV_MODE = os.environ.get("KIOSK_DEV") == "1"
 
 BLACK = QColor("#030508")
-NEON = QColor("#00c8ff")
+NEON = QColor(theme.load()["blue"])
 NEON_DEEP = QColor("#0066ff")
 NEON_WHITE = QColor("#c8f4ff")
 TEXT = QColor("#e6f7ff")
@@ -96,13 +98,13 @@ def build_stylesheet() -> str:
     QLabel#Status {{ font-size: {px(30)}px; font-weight: 300; }}
     QPushButton#Flat {{
         background: transparent;
-        border: {px(2)}px solid rgba(0, 200, 255, 90);
+        border: {px(2)}px solid rgba({NEON.red()}, {NEON.green()}, {NEON.blue()}, 90);
         border-radius: {px(12)}px;
         padding: {px(12)}px {px(28)}px;
     }}
     QPushButton#Flat:hover, QPushButton#Flat:focus {{
         border-color: {NEON.name()};
-        background: rgba(0, 200, 255, 35);
+        background: rgba({NEON.red()}, {NEON.green()}, {NEON.blue()}, 35);
     }}
     QPushButton#Flat:disabled {{ color: {MUTED.name()}; border-color: rgba(93, 122, 143, 60); }}
     QPushButton#Danger {{
@@ -119,17 +121,17 @@ def build_stylesheet() -> str:
     }}
     QListView, QPlainTextEdit {{
         background: rgba(8, 14, 22, 220);
-        border: {px(1)}px solid rgba(0, 200, 255, 70);
+        border: {px(1)}px solid rgba({NEON.red()}, {NEON.green()}, {NEON.blue()}, 70);
         border-radius: {px(16)}px;
         padding: {px(10)}px;
         outline: none;
-        selection-background-color: rgba(0, 200, 255, 60);
+        selection-background-color: rgba({NEON.red()}, {NEON.green()}, {NEON.blue()}, 60);
     }}
     QListView::item {{ padding: {px(10)}px; border-radius: {px(8)}px; }}
-    QListView::item:selected {{ background: rgba(0, 200, 255, 50); color: {TEXT.name()}; }}
+    QListView::item:selected {{ background: rgba({NEON.red()}, {NEON.green()}, {NEON.blue()}, 50); color: {TEXT.name()}; }}
     QScrollBar:vertical {{ background: transparent; width: {px(10)}px; margin: {px(4)}px; }}
     QScrollBar::handle:vertical {{
-        background: rgba(0, 200, 255, 100); border-radius: {px(3)}px; min-height: {px(40)}px;
+        background: rgba({NEON.red()}, {NEON.green()}, {NEON.blue()}, 100); border-radius: {px(3)}px; min-height: {px(40)}px;
     }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
@@ -206,6 +208,10 @@ def icon_path(kind: str) -> QPainterPath:
         p.cubicTo(-18, 38, -38, 24, -38, 0)
         p.lineTo(-38, -30); p.closeSubpath()
         p.moveTo(-16, 2); p.lineTo(-4, 14); p.lineTo(18, -12)
+    elif kind == "control":  # three sliders
+        for x, knob in ((-26, -12), (0, 14), (26, -2)):
+            p.moveTo(x, -40); p.lineTo(x, 40)
+            p.addRoundedRect(QRectF(x - 9, knob - 7, 18, 14), 4, 4)
     elif kind == "power":  # power symbol
         rect = QRectF(-36, -30, 72, 72)
         p.arcMoveTo(rect, 120)
@@ -563,11 +569,12 @@ class HomePage(QWidget):
         self.steam_button = NeonButton("Open Games (Steam)", "games")
         self.files_button = NeonButton("My Files", "files")
         self.scan_button = NeonButton("Antivirus Scan", "scan")
+        self.hub_button = NeonButton("Control Center", "control")
         self.power_button = NeonButton("Shut Down System", "power")
         row = QHBoxLayout()
         row.setSpacing(px(28))
         row.addStretch(1)
-        for button in (self.steam_button, self.files_button, self.scan_button, self.power_button):
+        for button in (self.steam_button, self.files_button, self.scan_button, self.hub_button, self.power_button):
             row.addWidget(button)
         row.addStretch(1)
         layout.addLayout(row)
@@ -898,6 +905,11 @@ class MainDesktop(Backdrop):
         self._allow_close = False
 
         self.steam = AppLauncher(config["KIOSK_STEAM_CMD"], self)
+        # The Control Center is its own process (a crash there never takes the desktop down).
+        self.hub = AppLauncher(shlex.join([sys.executable, "-m", "kiosk_shell.perdix_hub", "--maximized"]), self)
+        self.hub.started.connect(lambda: self.home.hub_button.set_badge("OPEN"))
+        self.hub.finished.connect(lambda _code: self.home.hub_button.set_badge(""))
+        self.hub.failed.connect(lambda message: self.home.show_message(message, error=True))
         self.scanner = VirusScanner(QDir.homePath(), self)
 
         self.home = HomePage()
@@ -916,6 +928,7 @@ class MainDesktop(Backdrop):
         self.home.files_button.clicked.connect(lambda: self.pages.setCurrentWidget(self.files))
         self.home.scan_button.clicked.connect(lambda: self.pages.setCurrentWidget(self.scan))
         self.home.power_button.clicked.connect(self.overlay.open)
+        self.home.hub_button.clicked.connect(self.open_control_center)
         self.home.brand_button.clicked.connect(lambda: self.pages.setCurrentWidget(self.about))
 
         self.steam.started.connect(self._steam_started)
@@ -940,14 +953,25 @@ class MainDesktop(Backdrop):
             self.home.show_message("Steam is already running.")
             return
         self.home.show_message("Starting Steam…", seconds=20)
-        # Competitor Mode (PERDIX Control Center) leaves its game environment in a file.
-        self.steam.start(read_shell_vars(competitor.ENV_PATH))
+        # Competitor Mode (PERDIX Control Center) adds its game environment while it is on.
+        self.steam.start(competitor.game_env())
 
     def _steam_started(self) -> None:
         self.home.steam_button.set_badge("RUNNING")
         self.home.logo.set_animated(False)
 
+    def open_control_center(self) -> None:
+        if self.hub.is_running():
+            self.home.show_message("Control Center is already open.")
+            return
+        package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.hub.start({"PYTHONPATH": package_root})
+
     def _steam_finished(self, exit_code: int) -> None:
+        try:
+            perflog.collect()  # summarise the session MangoHud just logged into perf.log
+        except OSError:
+            pass
         self.home.steam_button.set_badge("")
         self.home.logo.set_animated(True)
         self._bring_to_front()

@@ -1,0 +1,14 @@
+# Re-applies the settings PERDIX Control Center saved in /etc/perdix/ (BBR, QoS, GPU profile),
+# which the kernel forgets at every reboot. Runs alongside the desktop; it never delays login.
+[Unit]
+Description=PERDIX OS: restore saved network and GPU tuning
+Wants=network-online.target
+After=network-online.target systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/perdix-tune restore
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

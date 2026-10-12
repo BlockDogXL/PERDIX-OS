@@ -12,11 +12,14 @@ accents, 4 px corners). A vertical menu on the left switches the module shown on
 
 Root-level changes (CPU governor, sysctl, tc) go through `pkexec /usr/local/bin/perdix-tune`.
 
-Settings live in ~/.config/perdix/hub.json; macros in ~/.config/perdix/macros.json;
-the HUD config is written to ~/.config/MangoHud/MangoHud.conf.
+User settings live in ~/.config/perdix-os/ (settings.json, macros.json, theme.json for the
+orange / ice-blue accents); the HUD config is written to ~/.config/MangoHud/MangoHud.conf.
+System settings (game mode, network, HUD, GPU profile) are recorded by perdix-tune in
+/etc/perdix/perdix.conf and drivers.conf and re-applied at boot; see kiosk_shell/paths.py.
 
 Run:   python -m kiosk_shell.perdix_hub          (from shell/)
        python kiosk_shell/perdix_hub.py
+       python -m kiosk_shell.perdix_hub --maximized     (as the desktop's Control Center tile does)
        python -m kiosk_shell.perdix_hub --apply-saved   (re-apply mouse settings, no window;
                                                           run from .xinitrc at session start)
 """
@@ -24,6 +27,7 @@ Run:   python -m kiosk_shell.perdix_hub          (from shell/)
 from __future__ import annotations
 
 import argparse
+import configparser
 import math
 import os
 import sys
@@ -60,8 +64,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from kiosk_shell import __version__
-from kiosk_shell.services import competitor, hub_settings, hud, keywatch, macros, magnifier, mouse, tuning
+from kiosk_shell import __version__, paths
+from kiosk_shell.services import (competitor, hub_settings, hud, keywatch, macros, magnifier, mouse, perflog,
+                                  theme, tuning)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -70,9 +75,15 @@ PANEL = "#111317"
 PANEL_2 = "#171a1f"
 FIELD = "#0d0f12"
 LINE = "#262a31"
-ORANGE = "#ff6a1a"
-ORANGE_HOT = "#ff8a4a"
-ICE = "#8fe3ff"
+_THEME = theme.load()  # ~/.config/perdix-os/theme.json
+ORANGE = _THEME["orange"]
+ORANGE_HOT = QColor(ORANGE).lighter(125).name()
+ICE = _THEME["ice"]
+
+
+def _rgba(hex_color: str, alpha: int) -> str:
+    c = QColor(hex_color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
 TEXT = "#d9e2ea"
 MUTED = "#6b7480"
 DANGER = "#ff3355"
@@ -107,7 +118,7 @@ QPushButton#Primary {{ background: {ORANGE}; color: {BG}; border: 1px solid {ORA
 QPushButton#Primary:hover {{ background: {ORANGE_HOT}; border-color: {ORANGE_HOT}; color: {BG}; }}
 QPushButton#Primary:disabled {{ background: {PANEL_2}; border-color: {LINE}; color: {MUTED}; }}
 QPushButton#Segment {{ padding: 7px 12px; background: {FIELD}; }}
-QPushButton#Segment:checked {{ background: rgba(255, 106, 26, 38); border-color: {ORANGE}; color: {ORANGE}; }}
+QPushButton#Segment:checked {{ background: {_rgba(ORANGE, 38)}; border-color: {ORANGE}; color: {ORANGE}; }}
 
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     background: {FIELD}; border: 1px solid {LINE}; border-radius: {RADIUS}px;
@@ -117,7 +128,7 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border
 QLineEdit[readOnly="true"] {{ color: {ICE}; font-family: {MONO_STACK}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
 QComboBox QAbstractItemView {{
-    background: {PANEL_2}; border: 1px solid {LINE}; selection-background-color: rgba(255, 106, 26, 60);
+    background: {PANEL_2}; border: 1px solid {LINE}; selection-background-color: {_rgba(ORANGE, 60)};
     outline: none;
 }}
 QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
@@ -140,7 +151,7 @@ QCheckBox::indicator:checked {{ background: {ORANGE}; border-color: {ORANGE}; }}
 
 QListWidget, QTableWidget {{
     background: {FIELD}; border: 1px solid {LINE}; border-radius: {RADIUS}px; outline: none;
-    gridline-color: {LINE}; selection-background-color: rgba(143, 227, 255, 40); selection-color: {ICE};
+    gridline-color: {LINE}; selection-background-color: {_rgba(ICE, 40)}; selection-color: {ICE};
 }}
 QHeaderView {{ background: {PANEL_2}; border: none; }}
 QHeaderView::section:vertical {{
@@ -149,10 +160,10 @@ QHeaderView::section:vertical {{
 QListWidget::item {{ padding: 9px 10px; border-left: 2px solid transparent; }}
 QListWidget::item:hover {{ background: {PANEL_2}; }}
 QListWidget::item:selected {{
-    background: rgba(255, 106, 26, 30); color: {ORANGE}; border-left: 2px solid {ORANGE};
+    background: {_rgba(ORANGE, 30)}; color: {ORANGE}; border-left: 2px solid {ORANGE};
 }}
 QTableWidget::item {{ padding: 4px 8px; }}
-QTableWidget::item:selected {{ background: rgba(143, 227, 255, 30); color: {ICE}; }}
+QTableWidget::item:selected {{ background: {_rgba(ICE, 30)}; color: {ICE}; }}
 QHeaderView::section {{
     background: {PANEL_2}; color: {MUTED}; border: none; border-bottom: 1px solid {LINE};
     padding: 6px 8px; font-size: 11px; font-weight: 700;
@@ -1640,6 +1651,11 @@ class HudPage(QWidget):
         status_row.addWidget(self.gm_value)
         status_row.addWidget(self.gov_value)
         status_card.body.addLayout(status_row)
+        drivers = configparser.ConfigParser()
+        drivers.read(paths.DRIVERS_CONF, encoding="utf-8")
+        gpu_row, self.gpu_group = segmented([("auto", "GPU auto"), ("performance", "Max"), ("powersave", "Quiet")],
+                                            drivers.get("gpu", "profile", fallback="auto"))
+        status_card.body.addLayout(gpu_row)
         top.addWidget(status_card, 1)
         layout.addLayout(top)
         self.competitor_status = QLabel(objectName="Muted", wordWrap=True)
@@ -1666,6 +1682,9 @@ class HudPage(QWidget):
             grid.addWidget(box, i // 2, i % 2)
             self.metric_boxes[key] = box
         theme_card.body.addLayout(grid)
+        self.record_perf = QCheckBox("Record FPS and frame times to /var/log/perdix/perf.log",
+                                     checked=self.settings.record_perf)
+        theme_card.body.addWidget(self.record_perf)
         self.font_size = LabeledSlider("Text size", 12, 32, self.settings.font_size, lambda v: f"{v} px")
         theme_card.body.addWidget(self.font_size)
         columns.addWidget(theme_card, 5)
@@ -1683,7 +1702,12 @@ class HudPage(QWidget):
         preview_card.body.addLayout(launch_row)
         self.status = QLabel(objectName="Muted", wordWrap=True)
         preview_card.body.addWidget(self.status)
+        preview_card.body.addWidget(tracked_label("Last sessions  (perf.log)", "Muted", 1.5))
+        self.perf = QLabel(objectName="Value", wordWrap=True)
+        preview_card.body.addWidget(self.perf)
         columns.addWidget(preview_card, 6)
+        self._record_worker: Worker | None = None
+        self._gpu_worker: Worker | None = None
 
         # Theme buttons call the theme engine at once; checkboxes and the slider are batched.
         self.color_group.buttonClicked.connect(self.theme_clicked)
@@ -1692,11 +1716,32 @@ class HudPage(QWidget):
         for box in self.metric_boxes.values():
             box.toggled.connect(self.layout_changed)
         self.font_size.valueChanged.connect(self.layout_changed)
+        self.record_perf.toggled.connect(self.layout_changed)
+        self.gpu_group.buttonClicked.connect(self.gpu_clicked)
         self.refresh_status()
 
     def refresh_status(self) -> None:
         self.gm_value.set(hud.gamemode_status().upper())
         self.gov_value.set((tuning.current_governor() or "n/a").upper())
+        try:
+            perflog.collect()
+        except OSError:
+            pass
+        entries = perflog.last_entries(2)
+        self.perf.setText("\n".join(" ".join(e.split()[1:]) for e in entries) or "No sessions recorded yet.")
+
+    def gpu_clicked(self, *_args) -> None:
+        profile = group_value(self.gpu_group)
+        if self._gpu_worker is not None and self._gpu_worker.isRunning():
+            return
+        set_status(self.competitor_status, f"GPU profile: {profile}…", True)
+        self._gpu_worker = Worker(lambda: tuning.run_root("gpu", profile), self)
+        self._gpu_worker.done.connect(lambda result: set_status(
+            self.competitor_status,
+            f"GPU profile: {profile} (saved in /etc/perdix/drivers.conf)" if result == (True, "OK")
+            else f"GPU profile not changed: {result[1] if isinstance(result, tuple) else result}",
+            result == (True, "OK")))
+        self._gpu_worker.start()
 
     # Competitor mode ---------------------------------------------------------------------------
 
@@ -1736,10 +1781,16 @@ class HudPage(QWidget):
         hub_settings.save_section("hud", asdict(self.settings))
         set_status(self.status, f"PERDIX HUD: {self.settings.color}, {hud.POSITIONS[self.settings.position]} "
                                 f"→ {home_path(path)}", True)
+        # Also record the theme system-wide in /etc/perdix/perdix.conf (in the background).
+        if self._record_worker is None or not self._record_worker.isRunning():
+            color, position = self.settings.color, self.settings.position
+            self._record_worker = Worker(lambda: tuning.run_root("hud", color, position), self)
+            self._record_worker.start()
 
     def layout_changed(self, *_args) -> None:
         self.settings.metrics = {key: box.isChecked() for key, box in self.metric_boxes.items()}
         self.settings.font_size = self.font_size.value()
+        self.settings.record_perf = self.record_perf.isChecked()
         self.preview.update()
         self._layout_timer.start()
 
@@ -1839,7 +1890,8 @@ class NetworkPage(QWidget):
                        "ports always leave first; every band uses fq_codel to keep queues short."),
             ("Download", "Game UDP from those ports passes untouched. TCP traffic (downloads, updates, "
                          "streams) is policed to the limit so it can't saturate the line."),
-            ("Scope", "IPv4, this session only: everything resets on reboot or with Restore defaults."),
+            ("Scope", "IPv4. Saved in /etc/perdix/perdix.conf and re-applied at every boot by "
+                      "perdix-restore.service, until you press Restore defaults."),
         ):
             explain.body.addWidget(tracked_label(title, "EyebrowOrange", 2))
             explain.body.addWidget(QLabel(text, objectName="Muted", wordWrap=True))
@@ -1986,6 +2038,7 @@ def apply_saved_mouse_settings() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PERDIX Control Center")
+    parser.add_argument("--maximized", action="store_true", help="open maximised (kiosk desktop)")
     parser.add_argument("--apply-saved", action="store_true",
                         help="re-apply saved mouse settings and exit (for session start)")
     args, qt_args = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
@@ -1996,7 +2049,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("PERDIX Control Center")
     app.setStyleSheet(STYLESHEET)
     window = HubWindow()
-    window.show()
+    window.showMaximized() if args.maximized else window.show()
     return app.exec_()
 
 

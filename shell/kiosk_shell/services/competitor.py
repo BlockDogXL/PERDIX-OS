@@ -2,12 +2,16 @@
 
 On:  1. starts `gamemoded -r` (keeps GameMode requested until it is stopped),
      2. `cpupower frequency-set -g performance` through perdix-tune (needs root),
-     3. writes ~/.config/perdix/competitor.env, which the desktop adds to Steam's
+     3. pauses background services and timers (virus definition downloads, index rebuilds…);
+        perdix-tune logs which ones to /var/log/perdix/game_mode.log,
+     4. writes ~/.config/perdix-os/competitor.env, which the desktop adds to Steam's
         environment the next time it starts Steam (games inherit it).
-Off: stops that gamemoded, restores the previous governor and removes the env file.
+Off: stops that gamemoded, restores the previous governor, restarts the paused services and
+removes the env file. The on/off state is also recorded in /etc/perdix/perdix.conf.
 
-The state (gamemoded PID, previous governor) is kept in ~/.config/perdix/competitor.json,
-so the mode survives closing the Control Center.
+The state (gamemoded PID, previous governor, boot ID) is kept in
+~/.config/perdix-os/competitor.json, so the mode survives closing the Control Center but not
+a reboot.
 """
 
 import json
@@ -15,10 +19,12 @@ import os
 import signal
 import subprocess
 
+from kiosk_shell import paths
 from kiosk_shell.services import tuning
 
-STATE_PATH = os.path.expanduser("~/.config/perdix/competitor.json")
-ENV_PATH = os.path.expanduser("~/.config/perdix/competitor.env")
+STATE_PATH = paths.COMPETITOR_STATE
+ENV_PATH = paths.COMPETITOR_ENV
+BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id"
 
 # PERDIX runs Xorg + Openbox with no compositor, so games already draw straight to the
 # screen. These variables cover what is left: no vsync wait in Mesa and NVIDIA OpenGL, and
@@ -50,7 +56,15 @@ def _is_gamemoded(pid: object) -> bool:
 
 
 def is_active(path: str = STATE_PATH) -> bool:
-    return bool(_load_state(path)) and os.path.exists(ENV_PATH)
+    """On, and turned on during this boot (a reboot ends game mode)."""
+    state = _load_state(path)
+    return bool(state) and state.get("boot_id") == tuning.read_first_line(BOOT_ID_FILE) and os.path.exists(ENV_PATH)
+
+
+def game_env() -> dict[str, str]:
+    """Variables to add to Steam's environment: Competitor Mode's while it is on, else none."""
+    from kiosk_shell.config import read_shell_vars
+    return read_shell_vars(ENV_PATH) if is_active() else {}
 
 
 def write_env(path: str = ENV_PATH) -> None:
@@ -81,12 +95,17 @@ def activate() -> list[tuple[str, bool, str]]:
     ok, message = tuning.run_root("governor", "performance")
     results.append(("CPU governor", ok, "performance" if ok else message))
 
+    ok, message = tuning.run_root("services", "pause")
+    results.append(("Background services", ok, "paused (see game_mode.log)" if ok else message))
+
     write_env()
     results.append(("Game environment", True, "vsync off, compositor bypass (next Steam start)"))
+    tuning.run_root("game-mode", "on")
 
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
     with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump({"gamemoded_pid": pid, "previous_governor": previous}, f)
+        json.dump({"gamemoded_pid": pid, "previous_governor": previous,
+                   "boot_id": tuning.read_first_line(BOOT_ID_FILE)}, f)
     return results
 
 
@@ -101,6 +120,9 @@ def deactivate() -> list[tuple[str, bool, str]]:
     if previous and previous != "performance":
         ok, message = tuning.run_root("governor", previous)
         results.append(("CPU governor", ok, previous if ok else message))
+    ok, message = tuning.run_root("services", "resume")
+    results.append(("Background services", ok, "restarted" if ok else message))
+    tuning.run_root("game-mode", "off")
     for path in (ENV_PATH, STATE_PATH):
         try:
             os.remove(path)

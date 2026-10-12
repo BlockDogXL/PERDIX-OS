@@ -4,7 +4,8 @@
 set -euo pipefail
 source "$(dirname "$0")/../lib/common.sh"
 
-# TODO: useradd -m -G video,audio,input "$KIOSK_USER" (skip if it exists); passwd -l
+# TODO: useradd -m -G video,audio,input,perdix "$KIOSK_USER" (skip if it exists); passwd -l
+#       (group 'perdix' comes from rootfs/etc/sysusers.d/perdix.conf: run systemd-sysusers first)
 # TODO: copy skel/.bash_profile, skel/.xinitrc to the home dir, chown, touch .hushlogin
 # TODO: create the "admin" maintenance account with sudo (PLAN.md §7)
 warn "40-kiosk-user: not implemented yet"

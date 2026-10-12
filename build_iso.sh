@@ -152,6 +152,7 @@ u $KIOSK_USER $KIOSK_UID "PERDIX kiosk" /home/$KIOSK_USER /bin/bash
 m $KIOSK_USER video
 m $KIOSK_USER audio
 m $KIOSK_USER input
+m $KIOSK_USER perdix
 EOF
 
 # Replaces releng's root autologin (same file name).
@@ -182,6 +183,11 @@ xset s noblank
 
 # PERDIX feather pointer (rootfs/usr/share/icons/PERDIX-Feather, made by tools/make-cursor-theme.py).
 export XCURSOR_THEME=PERDIX-Feather XCURSOR_SIZE=32
+# The user's own cursor choice, if any: ~/.config/perdix-os/cursor.conf (XCURSOR_THEME=, XCURSOR_SIZE=).
+if [ -r "$HOME/.config/perdix-os/cursor.conf" ]; then
+    . "$HOME/.config/perdix-os/cursor.conf"
+    export XCURSOR_THEME XCURSOR_SIZE
+fi
 
 # Pass DISPLAY to systemd --user and D-Bus (PipeWire, portals, Steam).
 for f in /etc/X11/xinit/xinitrc.d/?*.sh; do
@@ -218,12 +224,19 @@ printf 'VERSION="%s"\nEDITION="Live ISO"\n' "$(date +%Y.%m.%d)" >"$AIROOTFS/etc/
 # The PERDIX feather cursor theme (symlinks included).
 mkdir -p "$AIROOTFS/usr/share/icons"
 cp -a -- "$REPO_DIR/rootfs/usr/share/icons/PERDIX-Feather" "$AIROOTFS/usr/share/icons/"
+# The PERDIX file layout: /etc/perdix and /var/log/perdix (tmpfiles), the 'perdix' log-writer
+# group (sysusers), and perdix-restore.service, which re-applies saved tuning at boot.
 for file in usr/local/bin/perdix-tune \
             usr/share/polkit-1/actions/org.perdix.tune.policy \
             etc/udev/rules.d/60-perdix-uinput.rules \
-            etc/modules-load.d/perdix-uinput.conf; do
+            etc/modules-load.d/perdix-uinput.conf \
+            etc/tmpfiles.d/perdix.conf \
+            etc/sysusers.d/perdix.conf \
+            etc/systemd/system/perdix-restore.service; do
     install -D -m 644 -- "$REPO_DIR/rootfs/$file" "$AIROOTFS/$file"
 done
+ln -sf /etc/systemd/system/perdix-restore.service \
+    "$AIROOTFS/etc/systemd/system/multi-user.target.wants/perdix-restore.service"
 
 # --- Lockdown ---------------------------------------------------------------------------------
 mkdir -p "$AIROOTFS/etc/X11/xorg.conf.d" "$AIROOTFS/etc/polkit-1/rules.d" "$AIROOTFS/etc/sysctl.d"

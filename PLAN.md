@@ -133,7 +133,7 @@ UEFI
    with neon-orange / ice-blue accents. Modules:
    - 01 Sens & Accel: Raw Accel-style curves (Off / Linear / Natural / Classic) sent to libinput's
      custom acceleration profile through xinput as you change them, with a live graph; saved to
-     `~/.config/perdix/hub.json` and re-applied at login (`perdix_hub --apply-saved` in `.xinitrc`).
+     `~/.config/perdix-os/settings.json` and re-applied at login (`perdix_hub --apply-saved` in `.xinitrc`).
      eDPI / cm-per-360 calculator and game-to-game converter.
    - 02 Tactical Scope: crosshair designer + overlay (X11 shape mask, click-through); zoom key
      watched with evdev, zooming the screen centre with `xrandr --transform` (Hyprland: `hyprctl`).
@@ -260,6 +260,43 @@ perdix-os/
 ├── tools/                      ← dev helpers
 └── docs/                       ← hardware notes, troubleshooting
 ```
+
+---
+
+## 6b. Runtime flow and file layout
+
+**From power-on to a game**
+
+1. `build_iso.sh` (or `tools/build-iso.sh`) builds an Arch ISO with Python/PyQt5, Mesa/Vulkan
+   (and NVIDIA with `--nvidia`), Steam and the PERDIX files. The boot menu and kernel text are
+   hidden; Plymouth shows the Piri splash instead.
+2. tty1 logs the `kiosk` user in; `.bash_profile` starts X; `.xinitrc` sets the cursor, re-applies
+   the mouse curve, starts Openbox and runs `main_desktop.py` full screen, restarting it if it exits.
+3. **Open Games (Steam)** starts `steam -gamepadui` (Steam's console-style Big Picture UI), with
+   Competitor Mode's environment added while that mode is on. When Steam exits, the session's
+   MangoHud log is summarised into `perf.log`.
+4. **Control Center** starts `perdix_hub.py` as its own process. Everything it changes as root
+   (CPU governor, BBR, `tc` QoS, GPU profile, paused services) goes through
+   `pkexec /usr/local/bin/perdix-tune`, which validates every argument and records the result.
+
+**Files** (all paths in `shell/kiosk_shell/paths.py`)
+
+| Path | Written by | Contents |
+|---|---|---|
+| `/etc/perdix/perdix.conf` | perdix-tune (root) | INI: `[game_mode]` competitor, governor · `[network]` tcp, qos, download_limit_mbit, game_ports · `[hud]` color, position |
+| `/etc/perdix/drivers.conf` | perdix-tune (root) | INI: `[gpu]` profile (auto / performance / powersave), cards |
+| `/var/log/perdix/game_mode.log` | perdix-tune (root) | Competitor Mode on/off, governor, GPU profile, which background services were stopped and restarted |
+| `/var/log/perdix/perf.log` | desktop / Control Center (group `perdix`) | One line per game session: avg FPS, 1 % low FPS, average and 99th-percentile frame time |
+| `/var/log/perdix/mangohud/` | MangoHud (group `perdix`) | Raw session logs perf.log is made from; kept 7 days after summarising |
+| `~/.config/perdix-os/theme.json` | user | Accent colours: orange, ice, blue (desktop neon) |
+| `~/.config/perdix-os/cursor.conf` | user / make-cursor-theme.py | `XCURSOR_THEME`, `XCURSOR_SIZE`, read by `.xinitrc` |
+| `~/.config/perdix-os/settings.json` | Control Center | Mouse curve, crosshair, zoom key, HUD layout, network form |
+| `~/.config/perdix-os/macros.json` | Macro Studio | Macros |
+| `~/.config/perdix-os/competitor.{json,env}` | Competitor Mode | State (ends with the boot) and the game environment for Steam |
+
+`/etc/tmpfiles.d/perdix.conf` creates the system folders, `/etc/sysusers.d/perdix.conf` the
+`perdix` group, and `perdix-restore.service` re-applies `perdix.conf` / `drivers.conf` at boot
+(BBR, QoS, GPU profile; game mode always starts off).
 
 ---
 
