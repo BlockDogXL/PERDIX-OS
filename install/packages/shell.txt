@@ -48,3 +48,6 @@ obs-studio
 # system); notify-send for PERDIX notifications (the desktop is the notification server).
 pacman-contrib
 libnotify
+# Control Center "Recovery": Timeshift system snapshots (rsync, or btrfs with the @ layout),
+# scheduled by perdix-snapshot.timer and taken before every update.
+timeshift

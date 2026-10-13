@@ -1,0 +1,13 @@
+[Unit]
+Description=PERDIX OS scheduled system snapshot (Timeshift: daily and weekly, if due)
+Documentation=man:timeshift(1)
+# Set up from PERDIX Control Center > Recovery (or by the first update); never on the live ISO.
+ConditionPathExists=/etc/timeshift/timeshift.json
+ConditionPathExists=!/run/archiso
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/timeshift --check --scripted --quiet
+# Background work: lowest CPU and disk priority, so a snapshot never costs frames.
+Nice=19
+IOSchedulingClass=idle

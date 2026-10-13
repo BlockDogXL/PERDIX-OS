@@ -11,4 +11,5 @@ source "$(dirname "$0")/../lib/common.sh"
 # TODO: write /etc/perdix-release (VERSION=..., EDITION="Installed") for the About System page
 # TODO: systemctl enable clamav-freshclam.service (virus definitions for the Antivirus Scan page)
 # TODO: systemctl enable bluetooth.service (Control Center "Bluetooth" page)
+# TODO: systemctl enable perdix-snapshot.timer (Recovery; does nothing until Timeshift is set up)
 warn "70-shell: not implemented yet"

@@ -42,6 +42,8 @@ Maintenance
   Updates              smart updater: checkupdates (safe, no root), grouped by driver/kernel/games/
                        system/apps, restart flagged; installs through perdix-tune after a Timeshift
                        snapshot; background check every 6 h, never during games; PERDIX notifications
+  Recovery             Timeshift system snapshots (never /home): before every update, daily, weekly and
+                       on demand; restore (restarts the PC) and delete, through perdix-tune
   Kılavuz              PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
                        "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
 
@@ -116,8 +118,8 @@ from PyQt5.QtWidgets import (
 from kiosk_shell import __version__, paths
 from kiosk_shell.services import (audio, bluetooth, camera, competitor, cutter, devices, diagnostics,
                                   hub_settings, hud, keywatch, kilavuz, macros, magnifier, mictest, mouse, network,
-                                  perflog, power, recorder, region, sharing, taskman, theme, tuning, updater,
-                                  vision)
+                                  perflog, power, recorder, recovery, region, sharing, taskman, theme, tuning,
+                                  updater, vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -407,6 +409,7 @@ NAV = [
     ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
     ("region", "globe", "Region & Language", "Time zone · keyboard · language", "System"),
     ("updates", "update", "Updates", "Check · install · restart", "Maintenance"),
+    ("recovery", "restore", "Recovery", "Snapshots · restore", "Maintenance"),
     ("security", "shield", "Kılavuz", "Güvenlik · port · izin", "Maintenance"),
 ]
 
@@ -482,6 +485,11 @@ def icon_path(kind: str) -> QPainterPath:
         p.arcTo(QRectF(-40, -40, 80, 80), 60, 300)
         p.moveTo(20, -35); p.lineTo(28, -20); p.lineTo(12, -18)
         p.moveTo(0, -18); p.lineTo(0, 18); p.moveTo(-12, 6); p.lineTo(0, 18); p.lineTo(12, 6)
+    elif kind == "restore":  # a clock with an arrow turning back
+        p.arcMoveTo(QRectF(-40, -40, 80, 80), 150)
+        p.arcTo(QRectF(-40, -40, 80, 80), 150, -300)
+        p.moveTo(-38, -30); p.lineTo(-36, -12); p.lineTo(-18, -16)
+        p.moveTo(0, -20); p.lineTo(0, 2); p.lineTo(16, 12)
     elif kind == "globe":  # a globe with meridians
         p.addEllipse(QPointF(0, 0), 42, 42)
         p.addEllipse(QPointF(0, 0), 18, 42)
@@ -5338,6 +5346,203 @@ class UpdatesPage(QWidget):
             self.install_thread.wait()  # never leave pacman half-way because the window closed
 
 
+class RecoveryPage(QWidget):
+    """Recovery center: Timeshift system snapshots — take, restore, delete."""
+
+    COLUMNS = ("Taken", "Kind", "Description")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.state: recovery.State | None = None
+        self._worker: Worker | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("recovery"), "Maintenance", "Recovery",
+                                    "System snapshots: if an update or a change breaks something, put PERDIX OS back "
+                                    "the way it was. Your games, saves and files are never part of a snapshot."))
+
+        top = Card("Snapshots")
+        row = QHBoxLayout()
+        self.count_value = Readout("Snapshots", orange=True)
+        self.newest_value = Readout("Newest", small=True)
+        self.free_value = Readout("Free space", small=True)
+        self.mode_value = Readout("Method", small=True)
+        for r in (self.count_value, self.newest_value, self.free_value, self.mode_value):
+            row.addWidget(r, 1)
+        self.setup_button = primary_button("Set up snapshots")
+        self.setup_button.clicked.connect(lambda: self._run(recovery.setup, "Setting up…"))
+        row.addWidget(self.setup_button)
+        top.body.addLayout(row)
+        row = QHBoxLayout()
+        self.comment = QLineEdit(placeholderText="What is this snapshot for? e.g. Before installing mods")
+        self.comment.setMaxLength(60)
+        self.create_button = primary_button("Take snapshot")
+        self.create_button.clicked.connect(self.create)
+        row.addWidget(self.comment, 1)
+        row.addWidget(self.create_button)
+        top.body.addLayout(row)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        top.body.addWidget(self.status)
+        layout.addWidget(top)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        listing = Card("Saved snapshots")
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels([c.upper() for c in self.COLUMNS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setMinimumHeight(240)
+        self.table.itemSelectionChanged.connect(self.update_buttons)
+        listing.body.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        self.restore_button = primary_button("Restore…")
+        self.restore_button.clicked.connect(self.restore)
+        self.delete_button = button("Delete")
+        self.delete_button.clicked.connect(self.delete)
+        row.addWidget(self.restore_button)
+        row.addWidget(self.delete_button)
+        row.addStretch(1)
+        listing.body.addLayout(row)
+        columns.addWidget(listing, 7)
+
+        about = Card("How it works")
+        for title, text in (
+            ("Automatic", "Before every update, every day (5 kept) and every week (3 kept). Paused while "
+                          "Competitor Mode is on."),
+            ("What is saved", "The system: programs, drivers and settings. Not /home: games, saves, "
+                              "screenshots and documents stay as they are when you restore."),
+            ("Restoring", "Puts the system files back to the chosen moment, then restarts the PC. The boot "
+                          "loader is left as it is."),
+        ):
+            about.body.addWidget(tracked_label(title, "EyebrowOrange", 2))
+            about.body.addWidget(QLabel(text, objectName="Muted", wordWrap=True))
+        about.body.addStretch(1)
+        columns.addWidget(about, 4)
+        layout.addLayout(columns, 1)
+        self.show_state(None)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh()
+
+    def busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def refresh(self) -> None:
+        if self.busy():
+            return
+        if recovery.is_live():
+            set_status(self.status, "Live system: snapshots need PERDIX OS installed on a disk (the live system "
+                                    "runs from memory).", False)
+            self.update_buttons()
+            return
+        self._worker = Worker(recovery.state, self)
+        self._worker.done.connect(self.show_state)
+        self._worker.start()
+
+    def show_state(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+            result = None
+        self.state = result
+        s = result
+        self.count_value.set(str(len(s.snapshots)) if s and s.configured else "—")
+        newest = s.newest if s else None
+        self.newest_value.set(newest.taken.strftime("%d.%m. %H:%M") if newest and newest.taken else "—")
+        self.free_value.set(s.free.upper() if s and s.free else "—")
+        self.mode_value.set((s.mode or "—").upper() if s and s.configured else "—")
+        if s is not None and not s.configured:
+            set_status(self.status, "Snapshots are not set up yet. Set them up once; the first update does it "
+                                    "too.", False)
+        elif s is not None and s.status and s.status != "OK":
+            set_status(self.status, f"Timeshift: {s.status}", False)
+        snapshots = sorted(s.snapshots, key=lambda x: x.name, reverse=True) if s else []
+        self.table.setRowCount(len(snapshots))
+        for row, snap in enumerate(snapshots):
+            taken = snap.taken.strftime("%d.%m.%Y  %H:%M") if snap.taken else snap.name
+            for column, text in enumerate((taken, snap.kind, snap.description)):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.UserRole, snap.name)
+                if column == 1 and snap.kind == "Before update":
+                    item.setForeground(qcolor(ORANGE))
+                self.table.setItem(row, column, item)
+        self.update_buttons()
+
+    def selected(self) -> recovery.Snapshot | None:
+        rows = self.table.selectionModel().selectedRows()
+        if not rows or self.state is None:
+            return None
+        name = self.table.item(rows[0].row(), 0).data(Qt.UserRole)
+        return next((s for s in self.state.snapshots if s.name == name), None)
+
+    def update_buttons(self) -> None:
+        idle, live = not self.busy(), recovery.is_live()
+        configured = bool(self.state and self.state.configured)
+        self.setup_button.setVisible(not configured and not live)
+        self.setup_button.setEnabled(idle)
+        self.create_button.setEnabled(idle and configured)
+        self.comment.setEnabled(configured)
+        has = self.selected() is not None
+        self.restore_button.setEnabled(idle and has)
+        self.delete_button.setEnabled(idle and has)
+
+    def _run(self, func, busy: str) -> None:
+        if self.busy():
+            return
+        set_status(self.status, busy, True)
+        self._worker = Worker(func, self)
+        self._worker.done.connect(self._done)
+        self._worker.start()
+        self.update_buttons()
+
+    def _done(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        set_status(self.status, str(result), not isinstance(result, Exception))
+        self.refresh()
+
+    def create(self) -> None:
+        comment = self.comment.text().strip() or "Manual"
+        self.comment.clear()
+        self._run(lambda: recovery.create(comment), "Taking a snapshot… (the first one takes a few minutes)")
+
+    def confirm(self, title: str, text: str) -> bool:
+        return QMessageBox.question(self, title, text, QMessageBox.Yes | QMessageBox.Cancel,
+                                    QMessageBox.Cancel) == QMessageBox.Yes
+
+    def restore(self) -> None:
+        snap = self.selected()
+        if snap is None:
+            return
+        when = snap.taken.strftime("%d.%m.%Y %H:%M") if snap.taken else snap.name
+        if self.confirm("Restore the system?",
+                        f"PERDIX OS goes back to {when} ({snap.description or snap.kind}).\n\n"
+                        "Programs, drivers and settings changed since then are undone. Games, saves and your "
+                        "files are not touched. The PC restarts when it is done.\n\nSave anything open first."):
+            self._run(lambda: recovery.restore(snap), "Restoring… don't switch the PC off.")
+
+    def delete(self) -> None:
+        snap = self.selected()
+        if snap is not None and self.confirm("Delete the snapshot?", "This snapshot can't be brought back."):
+            self._run(lambda: recovery.delete(snap), "Deleting…")
+
+    def shutdown(self) -> None:
+        if self.busy():
+            self._worker.wait()  # never leave Timeshift half-way
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -5590,7 +5795,8 @@ class HubWindow(QWidget):
              "diagnostics": "DiagnosticsPage", "region": "RegionPage",
              "bluetooth": "BluetoothPage", "sharing": "SharingPage",
              "cammic": "CameraMicPage", "record": "RecordingPage",
-             "cutter": "CutterPage", "updates": "UpdatesPage"}
+             "cutter": "CutterPage", "updates": "UpdatesPage",
+             "recovery": "RecoveryPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -5656,6 +5862,7 @@ class HubWindow(QWidget):
         self.record.shutdown()
         self.cutter.shutdown()
         self.updates.shutdown()
+        self.recovery.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

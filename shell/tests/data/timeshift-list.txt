@@ -1,0 +1,13 @@
+Mounted '/dev/loop0' at '/run/timeshift/3601/backup'
+Device : /dev/loop0
+UUID   : 1a700f1d-c273-4061-92a0-7fbc55251af0
+Path   : /run/timeshift/3601/backup
+Mode   : RSYNC
+Status : OK
+2 snapshots, 1.8 GB free
+
+Num     Name                 Tags  Description            
+------------------------------------------------------------------------------
+0    >  2026-10-13_13-28-01  O     PERDIX: before update  
+1    >  2026-10-13_13-28-46  D     Daily                  
+

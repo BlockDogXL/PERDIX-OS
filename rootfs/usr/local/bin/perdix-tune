@@ -18,6 +18,12 @@ every argument is validated here and commands are run without a shell.
   perdix-tune update                          Updater: safety snapshot (Timeshift, when set up), then
                                               the keyring and a full pacman upgrade; prints progress
                                               lines starting with "PERDIX:"
+  perdix-tune snapshot setup                  Recovery: set Timeshift up on the system disk (system
+                                              files only; /home is never in a snapshot)
+  perdix-tune snapshot list                   snapshots and the backup disk, as JSON
+  perdix-tune snapshot create <comment>       a snapshot now (comment: 1-60 printable characters)
+  perdix-tune snapshot delete <name>          names look like 2026-10-13_13-28-01 and must exist
+  perdix-tune snapshot restore <name>         put the system back to that snapshot (restarts the PC)
 
 Every change is recorded in /etc/perdix/perdix.conf (game mode, network, HUD) or
 /etc/perdix/drivers.conf (GPU profile); game-mode actions are logged to
@@ -60,6 +66,7 @@ PAUSABLE_UNITS = (
     "plocate-updatedb.timer",
     "paccache.timer",
     "reflector.timer",
+    "perdix-snapshot.timer",          # scheduled Timeshift snapshots (Recovery)
 )
 
 
@@ -325,7 +332,10 @@ def update_steps() -> list[list[str]]:
 
 
 def snapshot_command(comment: str) -> list[str]:
-    return ["timeshift", "--create", "--scripted", "--tags", "O", "--comments", comment]
+    """An on-demand Timeshift snapshot. No --tags: on-demand ("O") is the default for --create, and
+    Timeshift 24.01 rejects an explicit "--tags O" as an unknown value. --quiet: without it the
+    console progress display of Timeshift 24.01 crashed mid-copy in testing."""
+    return ["timeshift", "--create", "--scripted", "--quiet", "--comments", comment]
 
 
 def reboot_needed(modules_dir: str = "/usr/lib/modules") -> bool:
@@ -343,6 +353,11 @@ def update(runner=subprocess.call, live_marker: str = LIVE_MARKER, lock: str = P
     if os.path.exists(lock):
         raise RuntimeError("another update or installation is running (pacman is locked)")
     log("update.log", "update started")
+    if shutil.which("timeshift") and not os.path.exists(timeshift_conf):
+        try:  # the first update sets snapshots up, so there is always a way back
+            setup_snapshots(timeshift_conf, live_marker=live_marker)
+        except (RuntimeError, OSError) as error:
+            log("update.log", f"snapshots could not be set up: {error}")
     if os.path.exists(timeshift_conf) and shutil.which("timeshift"):
         print("PERDIX: snapshot", flush=True)
         if runner(snapshot_command("PERDIX: before update")) != 0:
@@ -362,6 +377,144 @@ def update(runner=subprocess.call, live_marker: str = LIVE_MARKER, lock: str = P
     log("update.log", "update finished" + (", restart needed" if restart else ""))
     print("PERDIX: done" + (" restart" if restart else ""), flush=True)
     return restart
+
+
+# --- recovery (Timeshift) ------------------------------------------------------------------------------------
+
+TIMESHIFT_DEFAULTS = "/etc/timeshift/default.json"
+SNAPSHOT_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+# Kept out of every snapshot: the user's files (games, saves, documents stay as they are when the
+# system is restored) and what can be downloaded again.
+SNAPSHOT_EXCLUDES = ["/home/**", "/root/**", "/var/cache/pacman/pkg/**", "/swapfile", "/var/tmp/**"]
+
+
+def timeshift_config(root_uuid: str, btrfs: bool, defaults: dict | None = None) -> dict:
+    """Timeshift's settings (its own default.json, values are strings): snapshots on the system disk,
+    5 daily and 3 weekly kept (a systemd timer runs `timeshift --check`), plus every on-demand one."""
+    config = dict(defaults or {})
+    config.update({"backup_device_uuid": root_uuid, "parent_device_uuid": "", "do_first_run": "false",
+                   "btrfs_mode": "true" if btrfs else "false", "include_btrfs_home": "false",
+                   "stop_cron_emails": "true", "schedule_monthly": "false", "schedule_weekly": "true",
+                   "schedule_daily": "true", "schedule_hourly": "false", "schedule_boot": "false",
+                   "count_weekly": "3", "count_daily": "5", "exclude": list(SNAPSHOT_EXCLUDES)})
+    config.setdefault("exclude-apps", [])
+    return config
+
+
+def root_filesystem() -> tuple[str, bool]:
+    """(UUID of the filesystem / lives on, whether Timeshift's btrfs mode fits it: btrfs with / in
+    the @ subvolume, the layout Timeshift needs)."""
+    out = subprocess.run(["findmnt", "-J", "-o", "UUID,FSTYPE,OPTIONS", "/"], capture_output=True, text=True).stdout
+    try:  # JSON: an empty UUID can't shift the other columns
+        fs = json.loads(out)["filesystems"][0]
+    except (ValueError, KeyError, IndexError):
+        fs = {}
+    uuid, fstype, options = fs.get("uuid") or "", fs.get("fstype") or "", fs.get("options") or ""
+    if not uuid:
+        raise RuntimeError("could not find the system disk's UUID")
+    return uuid, fstype == "btrfs" and "subvol=/@" in options.split(",")
+
+
+def setup_snapshots(conf_path: str = TIMESHIFT_CONF, defaults_path: str = TIMESHIFT_DEFAULTS,
+                    live_marker: str = LIVE_MARKER) -> dict:
+    if os.path.exists(live_marker):
+        raise UsageError("the live system runs from memory: snapshots need PERDIX OS installed on a disk")
+    try:
+        with open(defaults_path, encoding="utf-8") as f:
+            defaults = json.load(f)
+    except (OSError, ValueError):
+        defaults = {}
+    uuid, btrfs = root_filesystem()
+    config = timeshift_config(uuid, btrfs, defaults)
+    os.makedirs(os.path.dirname(conf_path), exist_ok=True)
+    tmp = conf_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, conf_path)
+    log("recovery.log", f"Timeshift set up on {uuid} ({'btrfs' if btrfs else 'rsync'})")
+    return config
+
+
+def parse_timeshift_list(text: str) -> dict:
+    """`timeshift --list --scripted` -> {"device", "mode", "status", "free", "snapshots": [...]}."""
+    info: dict = {"device": "", "mode": "", "status": "", "free": "", "snapshots": []}
+    for line in text.splitlines():
+        key, sep, value = line.partition(" : ")
+        if sep and key.strip() in ("Device", "Mode", "Status"):
+            info[key.strip().lower()] = value.strip()
+            continue
+        match = re.match(r"^\d+ snapshots?, (.+) free$", line.strip())
+        if match:
+            info["free"] = match.group(1)
+            continue
+        match = re.match(r"^\d+\s+>?\s*(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\s+([OBHDWM]*)\s*(.*)$", line.strip())
+        if match:
+            info["snapshots"].append({"name": match.group(1), "tags": match.group(2),
+                                      "description": match.group(3).strip()})
+    return info
+
+
+def list_snapshots(runner=subprocess.run, conf_path: str = TIMESHIFT_CONF) -> dict:
+    if not os.path.exists(conf_path):
+        return {"configured": False, "device": "", "mode": "", "status": "", "free": "", "snapshots": []}
+    result = runner(["timeshift", "--list", "--scripted"], capture_output=True, text=True, timeout=120)
+    info = parse_timeshift_list(result.stdout)
+    info["configured"] = True
+    return info
+
+
+def check_comment(text: str) -> str:
+    if not 1 <= len(text) <= 60 or not text.isprintable():
+        raise UsageError("a snapshot comment is 1-60 printable characters")
+    return text
+
+
+def check_snapshot(name: str, runner=subprocess.run, conf_path: str = TIMESHIFT_CONF) -> str:
+    if not SNAPSHOT_NAME.match(name):
+        raise UsageError(f"not a snapshot name: {name!r}")
+    if name not in {s["name"] for s in list_snapshots(runner, conf_path)["snapshots"]}:
+        raise UsageError(f"no snapshot called {name}")
+    return name
+
+
+def restore_command(name: str) -> list[str]:
+    """--skip-grub: the boot loader is left as it is. Timeshift asks for ENTER at its prompts even
+    with --scripted --yes, so the caller feeds newlines on stdin."""
+    return ["timeshift", "--restore", "--snapshot", name, "--scripted", "--yes", "--skip-grub", "--quiet"]
+
+
+def snapshot(argv: list[str], runner=subprocess.run, conf_path: str = TIMESHIFT_CONF,
+             live_marker: str = LIVE_MARKER) -> int:
+    match argv:
+        case ["setup"]:
+            setup_snapshots(conf_path, live_marker=live_marker)
+            return 0
+        case ["list"]:
+            print(json.dumps(list_snapshots(runner, conf_path), ensure_ascii=False))
+            return 0
+        case [action, *_] if action in ("create", "delete", "restore") and os.path.exists(live_marker):
+            raise UsageError("the live system runs from memory: snapshots need PERDIX OS installed on a disk")
+        case [action, *_] if action in ("create", "delete", "restore") and not os.path.exists(conf_path):
+            raise UsageError("snapshots are not set up yet")
+        case ["create", comment]:
+            command = snapshot_command(check_comment(comment))
+            stdin = None
+        case ["delete", name]:
+            command = ["timeshift", "--delete", "--snapshot", check_snapshot(name, runner, conf_path),
+                       "--scripted", "--quiet"]
+            stdin = None
+        case ["restore", name]:
+            command = restore_command(check_snapshot(name, runner, conf_path))
+            stdin = "\n" * 20
+        case _:
+            raise UsageError(f"unknown snapshot command: {' '.join(argv)!r}")
+    log("recovery.log", " ".join(command[:4]))
+    result = runner(command, input=stdin, capture_output=True, text=True, timeout=6 * 3600)
+    if result.returncode != 0:
+        lines = [l for l in (result.stdout + result.stderr).splitlines() if l.startswith("E: ")]
+        raise RuntimeError(lines[-1][3:] if lines else f"timeshift failed (exit code {result.returncode})")
+    return 0
 
 
 def load_kilavuz():
@@ -429,6 +582,8 @@ def main(argv: list[str]) -> int:
             case ["update"]:
                 update()
                 return 0
+            case ["snapshot", *rest]:
+                return snapshot(rest)
         commands, cleanup = plan(argv)
     except UsageError as error:
         print(f"perdix-tune: {error}", file=sys.stderr)

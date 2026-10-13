@@ -157,6 +157,8 @@ def tune(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "CONF_DIR", str(tmp_path / "etc"))
     monkeypatch.setattr(module, "LOG_DIR", str(tmp_path / "log"))
     monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/" + name)
+    # Snapshot set-up on the first update is tested in test_recovery.py; here Timeshift stays unset.
+    monkeypatch.setattr(module, "setup_snapshots", lambda path, live_marker=None: None)
     return module
 
 
@@ -169,7 +171,7 @@ def test_tune_update_runs_snapshot_keyring_upgrade(tune, tmp_path, capsys):
                           lock=str(tmp_path / "no-lock"), timeshift_conf=str(tmp_path / "timeshift.json"),
                           modules_dir=str(tmp_path / "modules"))
     assert restart is False
-    assert calls == [["timeshift", "--create", "--scripted", "--tags", "O", "--comments", "PERDIX: before update"],
+    assert calls == [["timeshift", "--create", "--scripted", "--quiet", "--comments", "PERDIX: before update"],
                      ["pacman", "-Sy", "--noconfirm", "--needed", "--noprogressbar", "archlinux-keyring"],
                      ["pacman", "-Su", "--noconfirm", "--noprogressbar"]]
     assert capsys.readouterr().out.splitlines() == ["PERDIX: snapshot", "PERDIX: keyring", "PERDIX: upgrade",

@@ -160,6 +160,8 @@ obs-studio
 # Updates: checkupdates; notify-send for PERDIX notifications
 pacman-contrib
 libnotify
+# Recovery: Timeshift system snapshots
+timeshift
 clamav
 plymouth
 EOF
@@ -296,6 +298,8 @@ for file in usr/local/bin/perdix-tune \
             etc/tmpfiles.d/perdix.conf \
             etc/sysusers.d/perdix.conf \
             etc/systemd/system/perdix-restore.service \
+            etc/systemd/system/perdix-snapshot.service \
+            etc/systemd/system/perdix-snapshot.timer \
             usr/lib/libreoffice/share/registry/perdix.xcd \
             etc/xdg/kritarc \
             etc/locale.gen; do
@@ -303,6 +307,10 @@ for file in usr/local/bin/perdix-tune \
 done
 ln -sf /etc/systemd/system/perdix-restore.service \
     "$AIROOTFS/etc/systemd/system/multi-user.target.wants/perdix-restore.service"
+# Scheduled system snapshots (Recovery); the service does nothing until Timeshift is set up.
+mkdir -p "$AIROOTFS/etc/systemd/system/timers.target.wants"
+ln -sf /etc/systemd/system/perdix-snapshot.timer \
+    "$AIROOTFS/etc/systemd/system/timers.target.wants/perdix-snapshot.timer"
 # PERDIX Kılavuz (security audit): read by the Control Center's Kılavuz page and by
 # `perdix-tune harden`, so it lives in a root-owned place.
 install -D -m 644 -- "$REPO_DIR/apps/perdix-kilavuz/perdix_kilavuz.py" \
