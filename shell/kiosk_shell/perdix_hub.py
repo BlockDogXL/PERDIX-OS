@@ -27,6 +27,8 @@ Media
                        microphone level meter, gain up to 150 % (wpctl), record and play back
   Game Recording       OBS Studio in the background over obs-websocket 5: F9 (any game, evdev) starts
                        and stops, 60 fps, GPU encoder (NVENC / VA-API) chosen after a test, MKV files
+  Video Cutter         lossless cut and join (ffmpeg stream copy, the LosslessCut approach): keyframe
+                       timeline, frame preview, several parts to keep, one file or one per part
 System
   Task Manager         CPU, RAM and GPU use with history, running programs, End task / Kill;
                        hung programs (no answer to _NET_WM_PING) are flagged and killed in one click
@@ -61,6 +63,7 @@ import argparse
 import configparser
 import math
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -69,8 +72,8 @@ if __package__ in (None, ""):  # run as a plain script: make the kiosk_shell pac
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt5.QtCore import QDateTime, QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import (QBitmap, QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
-                         QPixmap)
+from PyQt5.QtGui import (QBitmap, QColor, QFont, QFontMetrics, QImage, QKeySequence, QLinearGradient, QPainter,
+                         QPainterPath, QPen, QPixmap)
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -90,6 +93,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QShortcut,
     QSizeGrip,
     QSizePolicy,
     QSlider,
@@ -104,9 +108,9 @@ from PyQt5.QtWidgets import (
 )
 
 from kiosk_shell import __version__, paths
-from kiosk_shell.services import (audio, bluetooth, camera, competitor, devices, diagnostics, hub_settings, hud,
-                                  keywatch, kilavuz, macros, magnifier, mictest, mouse, network, perflog, recorder,
-                                  region, sharing, taskman, theme, tuning, vision)
+from kiosk_shell.services import (audio, bluetooth, camera, competitor, cutter, devices, diagnostics,
+                                  hub_settings, hud, keywatch, kilavuz, macros, magnifier, mictest, mouse, network,
+                                  perflog, recorder, region, sharing, taskman, theme, tuning, vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -387,6 +391,7 @@ NAV = [
     ("sharing", "share", "Sharing", "Screen · stream mix", "Media"),
     ("cammic", "camera", "Camera & Mic", "Preview · level · gain", "Media"),
     ("record", "rec", "Game Recording", "OBS · hotkey F9 · 60 fps", "Media"),
+    ("cutter", "scissors", "Video Cutter", "Lossless cut · join", "Media"),
     ("taskman", "tasks", "Task Manager", "CPU · RAM · GPU · processes", "System"),
     ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
     ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
@@ -456,6 +461,11 @@ def icon_path(kind: str) -> QPainterPath:
         p.addEllipse(QPointF(0, 0), 14, 14)
         for x in (-34, 28):
             p.addRect(QRectF(x, -22, 6, 6)); p.addRect(QRectF(x, 16, 6, 6))
+    elif kind == "scissors":
+        p.addEllipse(QPointF(-22, 26), 12, 12)
+        p.addEllipse(QPointF(22, 26), 12, 12)
+        p.moveTo(-14, 17); p.lineTo(26, -40)
+        p.moveTo(14, 17); p.lineTo(-26, -40)
     elif kind == "globe":  # a globe with meridians
         p.addEllipse(QPointF(0, 0), 42, 42)
         p.addEllipse(QPointF(0, 0), 18, 42)
@@ -4614,8 +4624,15 @@ class RecordingPage(QWidget):
         self.files = QListWidget()
         self.files.setMinimumHeight(200)
         files.body.addWidget(self.files, 1)
-        files.body.addWidget(QLabel(f"Saved in {home_path(recorder.videos_dir())} as MKV (safe if the PC crashes).",
-                                    objectName="Muted", wordWrap=True))
+        row = QHBoxLayout()
+        self.cut_button = button("Cut…")
+        self.cut_button.setToolTip("Open the selected recording in the Video Cutter")
+        self.cut_button.clicked.connect(self.cut_selected)
+        self.files.itemDoubleClicked.connect(lambda _item: self.cut_selected())
+        row.addWidget(QLabel(f"Saved in {home_path(recorder.videos_dir())} as MKV (safe if the PC crashes).",
+                             objectName="Muted", wordWrap=True), 1)
+        row.addWidget(self.cut_button)
+        files.body.addLayout(row)
         columns.addWidget(files, 5)
         layout.addLayout(columns, 1)
 
@@ -4711,9 +4728,406 @@ class RecordingPage(QWidget):
         if not self.files.count():
             self.files.addItem("No recordings yet.")
 
+    def cut_selected(self) -> None:
+        item = self.files.currentItem() or self.files.item(0)
+        path = item.data(Qt.UserRole) if item else None
+        window = self.window()
+        if path and hasattr(window, "open_module"):
+            window.open_module("cutter").load(path)
+
     def shutdown(self) -> None:
         self._timer.stop()
         for worker in (self._worker, self._status_worker, getattr(self, "_detect_worker", None)):
+            if worker is not None and worker.isRunning():
+                worker.wait()
+
+
+class Timeline(QWidget):
+    """The video as a bar: kept parts (orange), the part being marked (outline), keyframes (ice ticks)
+    and the playhead. Click or drag to move the playhead."""
+
+    moved = pyqtSignal(float)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent, cursor=Qt.PointingHandCursor)
+        self.setMinimumHeight(64)
+        self.start, self.duration, self.position = 0.0, 0.0, 0.0
+        self.keyframes: list[float] = []
+        self.parts: list[cutter.Segment] = []
+        self.marked: cutter.Segment | None = None
+
+    def x_of(self, t: float) -> float:
+        return 0.0 if self.duration <= 0 else (t - self.start) / self.duration * (self.width() - 1)
+
+    def t_of(self, x: float) -> float:
+        return self.start + max(0.0, min(1.0, x / max(1, self.width() - 1))) * self.duration
+
+    def mousePressEvent(self, event) -> None:
+        if self.duration > 0:
+            self.moved.emit(self.t_of(event.pos().x()))
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.LeftButton and self.duration > 0:
+            self.moved.emit(self.t_of(event.pos().x()))
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        bar = QRectF(0, 14, w, h - 30)
+        p.fillRect(bar, qcolor(PANEL_2))
+        if self.duration <= 0:
+            return
+        for part in self.parts:
+            p.fillRect(QRectF(self.x_of(part.start), bar.top(), max(2, self.x_of(part.end) - self.x_of(part.start)),
+                              bar.height()), qcolor(ORANGE, 0.55))
+        if self.marked is not None:
+            p.setPen(QPen(qcolor(ORANGE), 2))
+            p.drawRect(QRectF(self.x_of(self.marked.start), bar.top() + 1,
+                              max(2, self.x_of(self.marked.end) - self.x_of(self.marked.start)), bar.height() - 2))
+        step = max(1, len(self.keyframes) // max(1, w // 3))  # at most one tick per 3 pixels
+        p.setPen(QPen(qcolor(ICE, 0.7), 1))
+        for t in self.keyframes[::step]:
+            x = self.x_of(t)
+            p.drawLine(QPointF(x, bar.bottom() - 6), QPointF(x, bar.bottom()))
+        x = self.x_of(self.position)
+        p.setPen(QPen(qcolor(TEXT), 2))
+        p.drawLine(QPointF(x, 4), QPointF(x, bar.bottom() + 4))
+        p.setPen(qcolor(MUTED))
+        font = QFont(p.font())
+        font.setPixelSize(10)
+        p.setFont(font)
+        for i in range(5):
+            t = self.start + self.duration * i / 4
+            align = Qt.AlignLeft if i == 0 else Qt.AlignRight if i == 4 else Qt.AlignHCenter
+            p.drawText(QRectF(self.x_of(t) - (0 if i == 0 else 60 if i == 4 else 30), h - 14, 60, 14),
+                       align | Qt.AlignVCenter, cutter.clock(t - self.start)[:-4])
+
+
+class CutterPage(QWidget):
+    """Lossless video cutter and joiner (ffmpeg stream copy)."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.media: cutter.Media | None = None
+        self.parts: list[cutter.Segment] = []
+        self.mark_in = self.mark_out = 0.0
+        self.position = 0.0
+        self._worker: Worker | None = None
+        self._frame_worker: Worker | None = None
+        self._frame_pending = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("cutter"), "Media", "Video Cutter",
+                                    "Cut and join videos without re-encoding: no quality loss, done in seconds. "
+                                    "Cuts begin on keyframes (the ticks on the timeline)."))
+
+        editor = Card("Cut")
+        row = QHBoxLayout()
+        self.open_button = primary_button("Open video…")
+        self.open_button.clicked.connect(self.choose_file)
+        self.file_label = QLabel("No video open.", objectName="Muted")
+        row.addWidget(self.open_button)
+        row.addWidget(self.file_label, 1)
+        editor.body.addLayout(row)
+        w, h = camera.PREVIEW_SIZE
+        self.preview = QLabel(alignment=Qt.AlignCenter)
+        self.preview.setFixedSize(w, h)
+        self.preview.setStyleSheet("background: #000; border: 1px solid #222;")
+        editor.body.addWidget(self.preview, 0, Qt.AlignHCenter)
+        self.timeline = Timeline()
+        self.timeline.moved.connect(self.seek)
+        editor.body.addWidget(self.timeline)
+        row = QHBoxLayout()
+        self.position_value = Readout("Position", small=True)
+        self.in_value = Readout("Start (keyframe)", small=True)
+        self.out_value = Readout("End", small=True)
+        self.length_value = Readout("Length", small=True)
+        for r in (self.position_value, self.in_value, self.out_value, self.length_value):
+            row.addWidget(r, 1)
+        editor.body.addLayout(row)
+        row = QHBoxLayout()
+        self.prev_key = button("◀ Keyframe")
+        self.prev_key.clicked.connect(lambda: self.jump(-1))
+        self.next_key = button("Keyframe ▶")
+        self.next_key.clicked.connect(lambda: self.jump(1))
+        self.set_in = button("Set start  [I]")
+        self.set_in.clicked.connect(self.mark_start)
+        self.set_out = button("Set end  [O]")
+        self.set_out.clicked.connect(self.mark_end)
+        self.keep_button = button("Keep this part  [K]")
+        self.keep_button.clicked.connect(self.keep_part)
+        self.play_button = button("Play from here")
+        self.play_button.clicked.connect(self.play)
+        for b in (self.prev_key, self.next_key, self.set_in, self.set_out, self.keep_button):
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(self.play_button)
+        editor.body.addLayout(row)
+        for key, slot in (("I", self.mark_start), ("O", self.mark_end), ("K", self.keep_part),
+                          ("Left", lambda: self.jump(-1)), ("Right", lambda: self.jump(1))):
+            QShortcut(QKeySequence(key), self, slot, context=Qt.WidgetWithChildrenShortcut)
+        layout.addWidget(editor)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        parts = Card("Parts to keep")
+        self.parts_list = QListWidget()
+        self.parts_list.setMinimumHeight(110)
+        parts.body.addWidget(self.parts_list)
+        row = QHBoxLayout()
+        self.remove_part = button("Remove part")
+        self.remove_part.clicked.connect(self.drop_part)
+        row.addWidget(self.remove_part)
+        row.addStretch(1)
+        parts.body.addLayout(row)
+        mode_row, self.mode_group = segmented([("separate", "One file per part"), ("join", "Join into one file")],
+                                              "join")
+        parts.body.addLayout(mode_row)
+        row = QHBoxLayout()
+        self.container = QComboBox()
+        for key, text in (("same", "Same type as the video"), ("mp4", "MP4"), ("mkv", "MKV")):
+            self.container.addItem(text, key)
+        self.export_button = primary_button("Export")
+        self.export_button.clicked.connect(self.export)
+        row.addWidget(self.container, 1)
+        row.addWidget(self.export_button)
+        parts.body.addLayout(row)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        parts.body.addWidget(self.status)
+        columns.addWidget(parts, 6)
+
+        joiner = Card("Join videos")
+        self.join_list = QListWidget()
+        self.join_list.setMinimumHeight(110)
+        joiner.body.addWidget(self.join_list)
+        row = QHBoxLayout()
+        add = button("Add videos…")
+        add.clicked.connect(self.add_join_files)
+        clear = button("Clear")
+        clear.clicked.connect(self.join_list.clear)
+        self.join_button = primary_button("Join")
+        self.join_button.clicked.connect(self.join)
+        row.addWidget(add)
+        row.addWidget(clear)
+        row.addStretch(1)
+        row.addWidget(self.join_button)
+        joiner.body.addLayout(row)
+        self.join_status = QLabel("Videos of the same kind (same codec, size and frame rate, e.g. recordings "
+                                  "from this PC) are joined end to end.", objectName="Muted", wordWrap=True)
+        joiner.body.addWidget(self.join_status)
+        columns.addWidget(joiner, 5)
+        layout.addLayout(columns)
+
+        self._frame_timer = QTimer(self, singleShot=True, interval=90, timeout=self.load_frame)
+        self.update_view()
+
+    # --- opening ---
+
+    def choose_file(self) -> None:
+        start = recorder.videos_dir() if os.path.isdir(recorder.videos_dir()) else os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(self, "Open video", start,
+                                              "Videos (*.mkv *.mp4 *.mov *.webm *.avi *.ts *.flv);;All files (*)")
+        if path:
+            self.load(path)
+
+    def load(self, path: str) -> None:
+        set_status(self.status, f"Reading {os.path.basename(path)}…", True)
+        self._worker = Worker(lambda: cutter.probe(path), self)
+        self._worker.done.connect(self.loaded)
+        self._worker.start()
+        self.update_view()
+
+    def loaded(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+            self.update_view()
+            return
+        self.media = result
+        self.parts = []
+        self.mark_in, self.mark_out = result.start, result.start + result.duration
+        self.file_label.setText(f"{os.path.basename(result.path)}  ·  {result.summary()}  ·  "
+                                f"{taskman.human_bytes(result.size)}  ·  {len(result.keyframes)} keyframes")
+        self.file_label.setToolTip(result.path)
+        set_status(self.status, "Move to where the part begins and press Set start, then Set end.", True)
+        self.seek(result.start)
+        self.update_view()
+
+    # --- moving and marking ---
+
+    def seek(self, t: float) -> None:
+        if self.media is None:
+            return
+        self.position = max(self.media.start, min(t, self.media.start + self.media.duration))
+        self._frame_timer.start()
+        self.update_view()
+
+    def jump(self, direction: int) -> None:
+        if self.media is None:
+            return
+        keys = self.media.keyframes
+        target = (cutter.next_keyframe(keys, self.position) if direction > 0
+                  else cutter.previous_keyframe(keys, self.position))
+        if target is not None:
+            self.seek(target)
+
+    def mark_start(self) -> None:
+        if self.media is None:
+            return
+        self.mark_in = cutter.keyframe_at_or_before(self.media.keyframes, self.position)
+        if self.mark_out <= self.mark_in:
+            self.mark_out = self.media.start + self.media.duration
+        if abs(self.mark_in - self.position) > 0.01:
+            set_status(self.status, f"Start moved back to the keyframe at {cutter.clock(self.mark_in - self.media.start)} "
+                                    "(a lossless cut can only begin on one).", True)
+        self.update_view()
+
+    def mark_end(self) -> None:
+        if self.media is None:
+            return
+        if self.position <= self.mark_in:
+            set_status(self.status, "The end has to be after the start.", False)
+            return
+        self.mark_out = self.position
+        self.update_view()
+
+    def keep_part(self) -> None:
+        if self.media is None or self.mark_out - self.mark_in < 0.05:
+            return
+        self.parts.append(cutter.Segment(self.mark_in, self.mark_out))
+        self.parts.sort(key=lambda s: s.start)
+        set_status(self.status, f"{len(self.parts)} part{'s' if len(self.parts) != 1 else ''} kept. Mark the next "
+                                "one, or Export.", True)
+        self.update_view()
+
+    def drop_part(self) -> None:
+        row = self.parts_list.currentRow()
+        if 0 <= row < len(self.parts):
+            del self.parts[row]
+            self.update_view()
+
+    def update_view(self) -> None:
+        m = self.media
+        has = m is not None
+        idle = not (self._worker is not None and self._worker.isRunning())
+        for b in (self.prev_key, self.next_key, self.set_in, self.set_out, self.keep_button):
+            b.setEnabled(has)
+        self.play_button.setEnabled(has and shutil.which("ffplay") is not None)
+        self.export_button.setEnabled(has and idle)
+        self.open_button.setEnabled(idle)
+        self.join_button.setEnabled(idle and self.join_list.count() >= 2)
+        self.remove_part.setEnabled(bool(self.parts))
+        if not has:
+            self.timeline.duration = 0
+            self.timeline.update()
+            for r in (self.position_value, self.in_value, self.out_value, self.length_value):
+                r.set("—")
+            return
+        base = m.start
+        self.position_value.set(cutter.clock(self.position - base))
+        self.in_value.set(cutter.clock(self.mark_in - base))
+        self.out_value.set(cutter.clock(self.mark_out - base))
+        self.length_value.set(cutter.clock(self.mark_out - self.mark_in))
+        t = self.timeline
+        t.start, t.duration, t.position, t.keyframes = m.start, m.duration, self.position, m.keyframes
+        t.parts, t.marked = self.parts, cutter.Segment(self.mark_in, self.mark_out)
+        t.update()
+        self.parts_list.clear()
+        for i, part in enumerate(self.parts, 1):
+            self.parts_list.addItem(f"{i}.   {cutter.clock(part.start - base)}  →  {cutter.clock(part.end - base)}"
+                                    f"    ({cutter.clock(part.length)})")
+        if not self.parts:
+            self.parts_list.addItem("No parts yet: Export keeps the marked part (orange outline).")
+
+    # --- preview ---
+
+    def load_frame(self) -> None:
+        if self.media is None:
+            return
+        if self._frame_worker is not None and self._frame_worker.isRunning():
+            self._frame_pending = True
+            return
+        path, t = self.media.path, self.position
+        self._frame_worker = Worker(lambda: cutter.frame_png(path, t, camera.PREVIEW_SIZE[0]), self)
+        self._frame_worker.done.connect(self.show_frame)
+        self._frame_worker.start()
+
+    def show_frame(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        if isinstance(result, bytes):
+            image = QImage.fromData(result, "PNG")
+            self.preview.setPixmap(QPixmap.fromImage(image).scaled(self.preview.size(), Qt.KeepAspectRatio,
+                                                                   Qt.SmoothTransformation))
+        if self._frame_pending:
+            self._frame_pending = False
+            self.load_frame()
+
+    def play(self) -> None:
+        if self.media is not None and shutil.which("ffplay"):
+            subprocess.Popen(cutter.play_command(self.media.path, self.position), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    # --- export and join ---
+
+    def export(self) -> None:
+        if self.media is None:
+            return
+        media = self.media
+        parts = list(self.parts) or [cutter.Segment(self.mark_in, self.mark_out)]
+        join = group_value(self.mode_group) == "join"
+        container = self.container.currentData()
+        set_status(self.status, "Exporting (no re-encoding)…", True)
+        self._worker = Worker(lambda: cutter.export(media, parts, join, container), self)
+        self._worker.done.connect(self.exported)
+        self._worker.start()
+        self.update_view()
+
+    def exported(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+        else:
+            set_status(self.status, "Saved: " + ", ".join(os.path.basename(p) for p in result), True)
+        self.update_view()
+
+    def add_join_files(self) -> None:
+        start = recorder.videos_dir() if os.path.isdir(recorder.videos_dir()) else os.path.expanduser("~")
+        paths, _ = QFileDialog.getOpenFileNames(self, "Videos to join", start,
+                                                "Videos (*.mkv *.mp4 *.mov *.webm *.avi *.ts *.flv)")
+        for path in paths:
+            item = QListWidgetItem(os.path.basename(path))
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self.join_list.addItem(item)
+        self.update_view()
+
+    def join(self) -> None:
+        paths = [self.join_list.item(i).data(Qt.UserRole) for i in range(self.join_list.count())]
+        container = self.container.currentData()
+        set_status(self.join_status, "Joining (no re-encoding)…", True)
+        self._worker = Worker(lambda: cutter.join(paths, container), self)
+        self._worker.done.connect(self.joined)
+        self._worker.start()
+        self.update_view()
+
+    def joined(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        set_status(self.join_status, str(result) if isinstance(result, Exception)
+                   else f"Saved: {os.path.basename(result)}", not isinstance(result, Exception))
+        self.update_view()
+
+    def shutdown(self) -> None:
+        self._frame_timer.stop()
+        for worker in (self._worker, self._frame_worker):
             if worker is not None and worker.isRunning():
                 worker.wait()
 
@@ -4969,7 +5383,8 @@ class HubWindow(QWidget):
              "security": "SecurityPage", "taskman": "TaskManagerPage", "devices": "DevicesPage",
              "diagnostics": "DiagnosticsPage", "region": "RegionPage",
              "bluetooth": "BluetoothPage", "sharing": "SharingPage",
-             "cammic": "CameraMicPage", "record": "RecordingPage"}
+             "cammic": "CameraMicPage", "record": "RecordingPage",
+             "cutter": "CutterPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -5009,6 +5424,13 @@ class HubWindow(QWidget):
         self.sidebar.group.idClicked.connect(self.pages.setCurrentIndex)
         self.sidebar.buttons[0].setChecked(True)
 
+    def open_module(self, key: str) -> QWidget:
+        """Switch to a module's page (as if its menu entry was clicked) and return the page."""
+        button = self.sidebar.buttons[[entry[0] for entry in NAV].index(key)]
+        button.click()
+        self.sidebar.scroll.ensureWidgetVisible(button)
+        return getattr(self, key)
+
     def closeEvent(self, event) -> None:
         self.scope.overlay.close()
         self.scope.zoom.shutdown()
@@ -5026,6 +5448,7 @@ class HubWindow(QWidget):
         self.sharing.shutdown()
         self.cammic.shutdown()
         self.record.shutdown()
+        self.cutter.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)

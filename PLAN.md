@@ -200,7 +200,7 @@ polkit rule for a system service. Status: `[ ]` todo, `[x]` done.
 | 6 | [x] Screen & audio sharing | PERDIX runs Xorg, where Discord/OBS/browsers capture the screen directly; the module checks the pieces (PipeWire, portals) and adds a "stream mix": a PipeWire virtual microphone carrying game audio + mic for Discord | xdg-desktop-portal, -gtk | no root | real PipeWire with virtual devices |
 | 7 | [x] Camera & microphone test | `v4l2-ctl` (devices, formats/resolutions, controls) + live preview; microphone level meter from PipeWire and gain via `wpctl` | v4l-utils | none | parsers; PipeWire with a virtual mic |
 | 8 | [x] Game recording | OBS Studio (libobs) running in the background, driven over obs-websocket 5; hardware encoder (VAAPI / NVENC) so the game keeps its FPS; F9 through the existing evdev key watcher | obs-studio | input group already granted | websocket protocol against a test server; real FPS cost needs hardware |
-| 9 | [ ] Lossless video cutter | the LosslessCut approach: `ffmpeg -c copy` cut and concat (no re-encode), with a preview player | ffmpeg | none | real ffmpeg on generated clips |
+| 9 | [x] Lossless video cutter | the LosslessCut approach: `ffmpeg -c copy` cut and concat (no re-encode), with a preview player | ffmpeg | none | real ffmpeg on generated clips |
 | 10 | [ ] Smart updater | `checkupdates` (safe: separate database copy), update through `perdix-tune update` after a snapshot (item 11), neon-orange notification on the desktop | pacman-contrib | perdix-tune | commands recorded; live ISO cannot keep updates |
 | 11 | [ ] Recovery center | Timeshift snapshots: create, list, restore, delete; automatic snapshot before updates | timeshift | perdix-tune | commands recorded; restore needs an installed system |
 
