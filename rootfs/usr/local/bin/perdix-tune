@@ -15,6 +15,9 @@ every argument is validated here and commands are run without a shell.
   perdix-tune restore                         re-apply saved settings (perdix-restore.service)
   perdix-tune harden                          PERDIX Kılavuz: re-scan file permissions as root and
                                               apply its automatic fixes; prints the results as JSON
+  perdix-tune update                          Updater: safety snapshot (Timeshift, when set up), then
+                                              the keyring and a full pacman upgrade; prints progress
+                                              lines starting with "PERDIX:"
 
 Every change is recorded in /etc/perdix/perdix.conf (game mode, network, HUD) or
 /etc/perdix/drivers.conf (GPU profile); game-mode actions are logged to
@@ -308,6 +311,59 @@ def restore() -> list[str]:
     return problems
 
 
+# --- updates ----------------------------------------------------------------------------------------------
+
+LIVE_MARKER = "/run/archiso"  # present on the live ISO, which runs from memory
+PACMAN_LOCK = "/var/lib/pacman/db.lck"
+TIMESHIFT_CONF = "/etc/timeshift/timeshift.json"
+
+
+def update_steps() -> list[list[str]]:
+    """The keyring first (a stale keyring is the usual reason an Arch upgrade fails), then everything."""
+    return [["pacman", "-Sy", "--noconfirm", "--needed", "--noprogressbar", "archlinux-keyring"],
+            ["pacman", "-Su", "--noconfirm", "--noprogressbar"]]
+
+
+def snapshot_command(comment: str) -> list[str]:
+    return ["timeshift", "--create", "--scripted", "--tags", "O", "--comments", comment]
+
+
+def reboot_needed(modules_dir: str = "/usr/lib/modules") -> bool:
+    """After a kernel upgrade the running kernel's modules are gone: a restart is needed."""
+    return not os.path.isdir(os.path.join(modules_dir, os.uname().release))
+
+
+def update(runner=subprocess.call, live_marker: str = LIVE_MARKER, lock: str = PACMAN_LOCK,
+           timeshift_conf: str = TIMESHIFT_CONF, modules_dir: str = "/usr/lib/modules") -> bool:
+    """Snapshot, then upgrade. pacman's own output goes straight to the caller. Returns whether a
+    restart is needed."""
+    if os.path.exists(live_marker):
+        raise UsageError("this is the live system: it runs from memory, so updates would be gone after a "
+                         "restart. Install PERDIX OS to keep it up to date")
+    if os.path.exists(lock):
+        raise RuntimeError("another update or installation is running (pacman is locked)")
+    log("update.log", "update started")
+    if os.path.exists(timeshift_conf) and shutil.which("timeshift"):
+        print("PERDIX: snapshot", flush=True)
+        if runner(snapshot_command("PERDIX: before update")) != 0:
+            log("update.log", "safety snapshot failed; nothing was updated")
+            raise RuntimeError("the safety snapshot failed, so nothing was updated")
+    for step in update_steps():
+        print("PERDIX: " + ("keyring" if "archlinux-keyring" in step else "upgrade"), flush=True)
+        code = runner(step)
+        if code != 0:
+            log("update.log", f"{' '.join(step)} failed with exit code {code}")
+            record("perdix.conf", "update", {"last": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                             "result": "failed"})
+            raise RuntimeError(f"pacman failed (exit code {code}); see /var/log/pacman.log")
+    restart = reboot_needed(modules_dir)
+    record("perdix.conf", "update", {"last": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                     "result": "ok", "reboot": "yes" if restart else "no"})
+    log("update.log", "update finished" + (", restart needed" if restart else ""))
+    print("PERDIX: done" + (" restart" if restart else ""), flush=True)
+    return restart
+
+
 def load_kilavuz():
     """The installed perdix_kilavuz module (root-owned; never a path from the caller)."""
     sys.dont_write_bytecode = True  # no __pycache__ next to the installed module
@@ -369,6 +425,9 @@ def main(argv: list[str]) -> int:
                 return 0
             case ["harden"]:
                 print(json.dumps(harden(), ensure_ascii=False))
+                return 0
+            case ["update"]:
+                update()
                 return 0
         commands, cleanup = plan(argv)
     except UsageError as error:

@@ -39,6 +39,9 @@ System
   Devices              motherboard and BIOS, PCI parts (graphics, sound, network, storage) with the
                        driver in use (lspci -k), keyboards / mice / controllers, USB devices (lsusb)
 Maintenance
+  Updates              smart updater: checkupdates (safe, no root), grouped by driver/kernel/games/
+                       system/apps, restart flagged; installs through perdix-tune after a Timeshift
+                       snapshot; background check every 6 h, never during games; PERDIX notifications
   Kılavuz              PERDIX Sentinel, in Turkish: open ports and weak file permissions, and
                        "Açıkları Kapat" (close vulnerabilities) for the safe permission fixes
 
@@ -66,6 +69,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 
 if __package__ in (None, ""):  # run as a plain script: make the kiosk_shell package importable
@@ -91,6 +95,8 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QShortcut,
@@ -110,7 +116,8 @@ from PyQt5.QtWidgets import (
 from kiosk_shell import __version__, paths
 from kiosk_shell.services import (audio, bluetooth, camera, competitor, cutter, devices, diagnostics,
                                   hub_settings, hud, keywatch, kilavuz, macros, magnifier, mictest, mouse, network,
-                                  perflog, recorder, region, sharing, taskman, theme, tuning, vision)
+                                  perflog, power, recorder, region, sharing, taskman, theme, tuning, updater,
+                                  vision)
 
 # --- Look -----------------------------------------------------------------------------------------
 
@@ -193,6 +200,9 @@ QCheckBox::indicator {{
 QCheckBox::indicator:hover {{ border-color: {ICE}; }}
 QCheckBox::indicator:checked {{ background: {ORANGE}; border-color: {ORANGE}; }}
 
+QProgressBar {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 4px; }}
+QProgressBar::chunk {{ background: {ORANGE}; border-radius: 3px; }}
+QPlainTextEdit {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
 QListWidget, QTableWidget, QTreeWidget {{
     background: {FIELD}; border: 1px solid {LINE}; border-radius: {RADIUS}px; outline: none;
     gridline-color: {LINE}; selection-background-color: {_rgba(ICE, 40)}; selection-color: {ICE};
@@ -396,6 +406,7 @@ NAV = [
     ("devices", "chip", "Devices", "Hardware · drivers · USB", "System"),
     ("diagnostics", "pulse", "Diagnostics", "GPU · Vulkan · DirectX · BIOS", "System"),
     ("region", "globe", "Region & Language", "Time zone · keyboard · language", "System"),
+    ("updates", "update", "Updates", "Check · install · restart", "Maintenance"),
     ("security", "shield", "Kılavuz", "Güvenlik · port · izin", "Maintenance"),
 ]
 
@@ -466,6 +477,11 @@ def icon_path(kind: str) -> QPainterPath:
         p.addEllipse(QPointF(22, 26), 12, 12)
         p.moveTo(-14, 17); p.lineTo(26, -40)
         p.moveTo(14, 17); p.lineTo(-26, -40)
+    elif kind == "update":  # a circular arrow around a down arrow
+        p.arcMoveTo(QRectF(-40, -40, 80, 80), 60)
+        p.arcTo(QRectF(-40, -40, 80, 80), 60, 300)
+        p.moveTo(20, -35); p.lineTo(28, -20); p.lineTo(12, -18)
+        p.moveTo(0, -18); p.lineTo(0, 18); p.moveTo(-12, 6); p.lineTo(0, 18); p.lineTo(12, 6)
     elif kind == "globe":  # a globe with meridians
         p.addEllipse(QPointF(0, 0), 42, 42)
         p.addEllipse(QPointF(0, 0), 18, 42)
@@ -5132,6 +5148,196 @@ class CutterPage(QWidget):
                 worker.wait()
 
 
+class InstallThread(QThread):
+    """Runs the update and reports pacman's lines and the progress as they come."""
+
+    line = pyqtSignal(str)
+    progress = pyqtSignal(int, str)
+    done = pyqtSignal(object)
+
+    def run(self) -> None:
+        def on_line(text, progress):
+            self.line.emit(text)
+            self.progress.emit(progress.percent, progress.text())
+        try:
+            result = updater.install(on_line)
+        except Exception as error:
+            result = error
+        self.done.emit(result)
+
+
+class UpdatesPage(QWidget):
+    """Check for updates, see what they touch, install them after a safety snapshot."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.updates: list[updater.Update] = []
+        self._worker: Worker | None = None
+        self.install_thread: InstallThread | None = None
+        self.restart_needed = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(PageHeader(module_number("updates"), "Maintenance", "Updates",
+                                    "Drivers, games and the system in one step. A safety snapshot is taken first, "
+                                    "and nothing is checked or installed while you play."))
+
+        top = Card("Status")
+        row = QHBoxLayout()
+        self.state_value = Readout("Status", orange=True)
+        self.count_value = Readout("Updates")
+        self.checked_value = Readout("Last check", small=True)
+        self.restart_value = Readout("Restart", small=True)
+        for r in (self.state_value, self.count_value, self.checked_value, self.restart_value):
+            row.addWidget(r, 1)
+        self.check_button = button("Check now")
+        self.check_button.clicked.connect(self.check)
+        self.install_button = primary_button("Install updates")
+        self.install_button.clicked.connect(self.install)
+        self.restart_button = primary_button("Restart now")
+        self.restart_button.clicked.connect(power.reboot)
+        self.restart_button.hide()
+        for b in (self.check_button, self.install_button, self.restart_button):
+            row.addWidget(b)
+        top.body.addLayout(row)
+        self.auto = QCheckBox("Check automatically: 10 minutes after start, then every 6 hours, never during a game",
+                              cursor=Qt.PointingHandCursor, checked=updater.settings()["auto_check"])
+        self.auto.clicked.connect(self.save_auto)
+        top.body.addWidget(self.auto)
+        self.status = QLabel(objectName="Muted", wordWrap=True)
+        top.body.addWidget(self.status)
+        if updater.is_live():
+            set_status(self.status, "Live system: checking works, installing needs PERDIX OS installed on a disk "
+                                    "(the live system runs from memory).", False)
+        layout.addWidget(top)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        listing = Card("Available updates")
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["PACKAGE", "INSTALLED", "NEW", ""])
+        self.tree.setRootIsDecorated(True)
+        self.tree.setMinimumHeight(260)
+        header = self.tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in (1, 2, 3):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        listing.body.addWidget(self.tree, 1)
+        columns.addWidget(listing, 6)
+
+        progress = Card("Installing")
+        self.progress_bar = QProgressBar(textVisible=False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setFixedHeight(8)
+        progress.body.addWidget(self.progress_bar)
+        self.progress_label = QLabel("Nothing is being installed.", objectName="Muted", wordWrap=True)
+        progress.body.addWidget(self.progress_label)
+        self.log = QPlainTextEdit(readOnly=True)
+        self.log.setMaximumBlockCount(400)
+        self.log.setMinimumHeight(200)
+        self.log.setStyleSheet(f"font-family: monospace; font-size: 11px; color: {MUTED};")
+        progress.body.addWidget(self.log, 1)
+        columns.addWidget(progress, 5)
+        layout.addLayout(columns, 1)
+        self.show_updates([], None)
+
+    def save_auto(self) -> None:
+        values = updater.settings()
+        values["auto_check"] = self.auto.isChecked()
+        hub_settings.save_section("updates", values)
+
+    def busy(self) -> bool:
+        return (self._worker is not None and self._worker.isRunning()) or (
+            self.install_thread is not None and self.install_thread.isRunning())
+
+    def update_buttons(self) -> None:
+        idle = not self.busy()
+        self.check_button.setEnabled(idle)
+        self.install_button.setEnabled(idle and bool(self.updates) and not updater.is_live())
+        self.restart_button.setVisible(self.restart_needed)
+
+    def check(self) -> None:
+        if self.busy():
+            return
+        set_status(self.status, "Checking for updates…", True)
+        self._worker = Worker(updater.check, self)
+        self._worker.done.connect(self.checked)
+        self._worker.start()
+        self.update_buttons()
+
+    def checked(self, result) -> None:
+        sender = self.sender()
+        if isinstance(sender, Worker):
+            sender.wait()
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+            self.update_buttons()
+            return
+        updater.remember(result)
+        self.show_updates(result, time.time())
+        set_status(self.status, updater.summary(result) + ".", True)
+
+    def show_updates(self, updates: list, when: float | None) -> None:
+        self.updates = updates
+        self.state_value.set("UP TO DATE" if when and not updates else f"{len(updates)} READY" if updates else "—")
+        self.count_value.set(str(len(updates)) if when else "—")
+        last = when or updater.settings()["last_check"]
+        self.checked_value.set(QDateTime.fromSecsSinceEpoch(int(last)).toString("dd.MM. hh:mm") if last else "never")
+        needs_restart = [u for u in updates if u.needs_restart]
+        self.restart_value.set("AFTERWARDS" if needs_restart else "NO" if when else "—")
+        self.tree.clear()
+        for group, items in updater.by_group(updates):
+            parent = QTreeWidgetItem([f"{group}  ({len(items)})", "", "", ""])
+            parent.setForeground(0, qcolor(ORANGE))
+            for u in items:
+                child = QTreeWidgetItem([u.name, u.old, u.new, "restart" if u.needs_restart else ""])
+                child.setForeground(3, qcolor(ORANGE))
+                parent.addChild(child)
+            self.tree.addTopLevelItem(parent)
+            parent.setExpanded(group != "Apps" or len(items) <= 12)
+        self.update_buttons()
+
+    def install(self) -> None:
+        if self.busy() or not self.updates:
+            return
+        self.log.clear()
+        self.progress_bar.setValue(0)
+        self.install_thread = InstallThread(self)
+        self.install_thread.line.connect(self.log.appendPlainText)
+        self.install_thread.progress.connect(self.show_progress)
+        self.install_thread.done.connect(self.installed)
+        self.install_thread.start()
+        set_status(self.status, "Installing. You can keep using the PC; don't start a game until it is done.", True)
+        self.update_buttons()
+
+    def show_progress(self, percent: int, text: str) -> None:
+        self.progress_bar.setValue(percent)
+        self.progress_label.setText(text)
+
+    def installed(self, result) -> None:
+        if self.install_thread is not None:
+            self.install_thread.wait()
+        if isinstance(result, Exception):
+            set_status(self.status, str(result), False)
+            self.progress_label.setText("Stopped. Nothing after the error was changed; the snapshot (if taken) "
+                                        "can undo the rest in Recovery.")
+        else:
+            self.restart_needed = result.restart
+            self.progress_bar.setValue(100)
+            self.progress_label.setText(result.text())
+            set_status(self.status, "Updated." + (" Restart to finish (new kernel or driver)." if result.restart
+                                                  else ""), True)
+            self.show_updates([], time.time())
+            updater.remember([])
+        self.update_buttons()
+
+    def shutdown(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait()
+        if self.install_thread is not None and self.install_thread.isRunning():
+            self.install_thread.wait()  # never leave pacman half-way because the window closed
+
+
 # --- 07 PERDIX Kılavuz -----------------------------------------------------------------------------
 
 
@@ -5384,7 +5590,7 @@ class HubWindow(QWidget):
              "diagnostics": "DiagnosticsPage", "region": "RegionPage",
              "bluetooth": "BluetoothPage", "sharing": "SharingPage",
              "cammic": "CameraMicPage", "record": "RecordingPage",
-             "cutter": "CutterPage"}
+             "cutter": "CutterPage", "updates": "UpdatesPage"}
 
     def __init__(self) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -5449,6 +5655,7 @@ class HubWindow(QWidget):
         self.cammic.shutdown()
         self.record.shutdown()
         self.cutter.shutdown()
+        self.updates.shutdown()
         if self.security.busy():
             self.security._worker.wait()  # never leave a scan or perdix-tune half-way
         super().closeEvent(event)
@@ -5499,6 +5706,7 @@ def apply_saved_audio_effects() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PERDIX Control Center")
     parser.add_argument("--maximized", action="store_true", help="open maximised (kiosk desktop)")
+    parser.add_argument("--page", choices=[entry[0] for entry in NAV], help="open on this module")
     parser.add_argument("--apply-saved", action="store_true",
                         help="re-apply saved mouse settings and sound effects, then exit (session start)")
     args, qt_args = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
@@ -5511,6 +5719,10 @@ def main(argv: list[str] | None = None) -> int:
     app.setStyleSheet(STYLESHEET)
     window = HubWindow()
     window.showMaximized() if args.maximized else window.show()
+    if args.page:
+        window.open_module(args.page)
+        if args.page == "updates":
+            window.updates.check()
     return app.exec_()
 
 

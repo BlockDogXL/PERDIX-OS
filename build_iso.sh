@@ -157,6 +157,9 @@ v4l-utils
 ffmpeg
 # Game Recording: OBS Studio (obs-websocket built in) in the background
 obs-studio
+# Updates: checkupdates; notify-send for PERDIX notifications
+pacman-contrib
+libnotify
 clamav
 plymouth
 EOF
@@ -252,11 +255,12 @@ openbox &
 # few seconds to start, and the desktop must not wait for it.
 PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.perdix_hub --apply-saved >/dev/null 2>&1 &
 
-# Session helpers from PERDIX Control Center: the Stream Mix follower (Sharing) and the recording
-# hotkey (F9, OBS). Both stop by themselves when this session ends.
+# Session helpers from PERDIX Control Center: the Stream Mix follower (Sharing), the recording
+# hotkey (F9, OBS) and the update check. They stop by themselves when this session ends.
 mkdir -p "$HOME/.local/state/perdix"
 PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.sharing --follow >>"$HOME/.local/state/perdix/sharing.log" 2>&1 &
 PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.recorder --hotkey >>"$HOME/.local/state/perdix/recording.log" 2>&1 &
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.updater --watch >>"$HOME/.local/state/perdix/updates.log" 2>&1 &
 
 # Launch the PERDIX desktop, and restart it if it ever exits or crashes.
 while true; do

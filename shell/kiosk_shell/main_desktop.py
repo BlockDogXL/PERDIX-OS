@@ -1209,7 +1209,10 @@ def main(argv: list[str] | None = None) -> int:
     _scale = max(0.5, screen_height / 1080)
     app.setStyleSheet(build_stylesheet())
 
+    # PERDIX notifications: neon-orange toasts for notify-send / libnotify (recording, updates, ...).
+    from kiosk_shell import notifications
     window = MainDesktop(load_config())
+    window.notifications = notifications.start(window)
     if DEV_MODE:
         window.resize(1280, 720)
         window.show()

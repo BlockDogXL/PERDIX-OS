@@ -44,3 +44,7 @@ ffmpeg
 # Control Center "Game Recording": OBS Studio, driven over its built-in obs-websocket 5. GPU
 # encoding needs the VA-API driver (mesa for AMD, intel-media-driver for Intel) or NVIDIA's.
 obs-studio
+# Control Center "Updates": checkupdates (a private database copy, so a check never changes the
+# system); notify-send for PERDIX notifications (the desktop is the notification server).
+pacman-contrib
+libnotify

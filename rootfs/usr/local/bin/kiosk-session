@@ -9,10 +9,13 @@ log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/kiosk"
 mkdir -p "$log_dir"
 
 # Session helpers from PERDIX Control Center: the Stream Mix follower (Sharing) keeps the virtual
-# microphone in step with the sound devices; the recording hotkey (F9) starts and stops OBS.
+# microphone in step with the sound devices; the recording hotkey (F9) starts and stops OBS; the
+# update check runs 10 minutes after login and then every 6 hours.
 PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.sharing --follow >>"$log_dir/sharing.log" 2>&1 &
 helpers=$!
 PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.recorder --hotkey >>"$log_dir/recording.log" 2>&1 &
+helpers="$helpers $!"
+PYTHONPATH=/opt/kiosk-shell python -m kiosk_shell.services.updater --watch >>"$log_dir/updates.log" 2>&1 &
 helpers="$helpers $!"
 trap 'kill $helpers 2>/dev/null' EXIT
 
