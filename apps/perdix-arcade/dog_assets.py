@@ -1,13 +1,11 @@
 """The Çatalburun dog drawn by hand, loaded for the game.
 
-Two sets, both transparent PNGs:
-- assets/dog/*.png (68x68): side (facing right), three-quarter front, three-quarter back (looking
-  right and left), back.
-- assets/dog/48/*.png (48x48, more detailed): three-quarter front looking right and left (drawn
-  separately, not mirrored), side facing left.
+The game's dog is the 48 px set, assets/dog/48/*.png (48x48, transparent): three-quarter front
+looking right and left (drawn separately, not mirrored) and the side view facing left. The first,
+68 px set (assets/dog/*.png: side, three-quarter front and back, back) is kept as views_68().
 A view drawn in only one direction also gets a mirrored copy, so every view has a _right and _left.
-Animation strips added later (e.g. assets/dog/sniff_1.png, sniff_2.png, ...) are found by name and
-loaded in order.
+Animation strips added later (e.g. assets/dog/48/sniff_1.png, sniff_2.png, ...) are found by name
+and loaded in order.
 
 `python dog_assets.py <out.png> [scale]` writes a labelled sprite sheet of everything found.
 """
@@ -21,14 +19,15 @@ import sys
 
 import pygame
 
-ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "dog")
-SET_48 = os.path.join(ASSET_DIR, "48")
+DOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "dog")
+ASSET_DIR = os.path.join(DOG_DIR, "48")  # the game's dog
+SET_68 = DOG_DIR
 VIEWS_48 = {
     "front_three_quarter_right": "front_three_quarter_right.png",
     "front_three_quarter_left": "front_three_quarter_left.png",
     "side_left": "side_left.png",
 }
-VIEWS = {
+VIEWS_68 = {
     "side_right": "stand_side.png",
     "front_three_quarter_right": "stand_front_three_quarter.png",
     "back_three_quarter_right": "stand_back_three_quarter_right.png",
@@ -43,7 +42,7 @@ def load(name: str, folder: str = ASSET_DIR) -> pygame.Surface:
 
 
 def views(folder: str = ASSET_DIR, names: dict[str, str] | None = None) -> dict[str, pygame.Surface]:
-    names = VIEWS if names is None else names
+    names = VIEWS_48 if names is None else names
     found = {key: load(name, folder) for key, name in names.items() if os.path.exists(os.path.join(folder, name))}
     for key in list(found):
         for this, other in (("_right", "_left"), ("_left", "_right")):
@@ -52,8 +51,8 @@ def views(folder: str = ASSET_DIR, names: dict[str, str] | None = None) -> dict[
     return found
 
 
-def views_48() -> dict[str, pygame.Surface]:
-    return views(SET_48, VIEWS_48)
+def views_68() -> dict[str, pygame.Surface]:
+    return views(SET_68, VIEWS_68)
 
 
 def animations(folder: str = ASSET_DIR) -> dict[str, list[pygame.Surface]]:
@@ -74,7 +73,7 @@ def animations(folder: str = ASSET_DIR) -> dict[str, list[pygame.Surface]]:
 
 def sheet(scale: int = 4) -> pygame.Surface:
     """Every view and animation on one labelled sheet (for looking at, not for the game)."""
-    rows = [("views", list(views().items())), ("48", [(f"48 {k}", v) for k, v in views_48().items()])]
+    rows = [("48", list(views().items())), ("68", [(f"68 {k}", v) for k, v in views_68().items()])]
     rows += [(k, [(f"{k} {i + 1}", f) for i, f in enumerate(v)]) for k, v in sorted(animations().items())]
     font = pygame.font.Font(None, 10 * scale // 2)
     cell = 68
