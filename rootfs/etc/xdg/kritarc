@@ -1,0 +1,6 @@
+# PERDIX OS defaults for Krita (the desktop's Çizim Stüdyosu). Krita reads this file under the
+# user's own ~/.config/kritarc, so anything changed in Settings > Configure Krita still wins.
+
+# Instant Preview: while painting with a large brush, Krita first draws a lower-resolution
+# preview on the GPU and fills in full detail right after, so big strokes stay smooth.
+levelOfDetailEnabled=true

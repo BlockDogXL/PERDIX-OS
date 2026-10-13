@@ -1,0 +1,611 @@
+#!/usr/bin/env python3
+"""perdix-tune: the only root-level actions PERDIX Control Center may perform.
+
+Run through pkexec; the polkit rule lets the kiosk user call it without a password, so
+every argument is validated here and commands are run without a shell.
+
+  perdix-tune governor <performance|powersave|schedutil|ondemand|conservative>
+  perdix-tune tcp <bbr|cubic|reno>
+  perdix-tune qos on <interface> <download-limit-mbit> <udp-ports>   e.g. 27015-27050,7000-8000
+  perdix-tune qos off <interface>
+  perdix-tune services <pause|resume>        background services/timers during game mode
+  perdix-tune gpu <auto|performance|powersave>
+  perdix-tune game-mode <on|off>              record Competitor Mode's state
+  perdix-tune hud <orange|white> <top-left|bottom-right>   record the PERDIX HUD theme
+  perdix-tune restore                         re-apply saved settings (perdix-restore.service)
+  perdix-tune harden                          PERDIX Kılavuz: re-scan file permissions as root and
+                                              apply its automatic fixes; prints the results as JSON
+  perdix-tune update                          Updater: safety snapshot (Timeshift, when set up), then
+                                              the keyring and a full pacman upgrade; prints progress
+                                              lines starting with "PERDIX:"
+  perdix-tune snapshot setup                  Recovery: set Timeshift up on the system disk (system
+                                              files only; /home is never in a snapshot)
+  perdix-tune snapshot list                   snapshots and the backup disk, as JSON
+  perdix-tune snapshot create <comment>       a snapshot now (comment: 1-60 printable characters)
+  perdix-tune snapshot delete <name>          names look like 2026-10-13_13-28-01 and must exist
+  perdix-tune snapshot restore <name>         put the system back to that snapshot (restarts the PC)
+
+Every change is recorded in /etc/perdix/perdix.conf (game mode, network, HUD) or
+/etc/perdix/drivers.conf (GPU profile); game-mode actions are logged to
+/var/log/perdix/game_mode.log. Hardening is logged to /var/log/perdix/kilavuz.log.
+"""
+
+import configparser
+import glob
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+CONF_DIR = "/etc/perdix"
+LOG_DIR = "/var/log/perdix"
+RUN_DIR = "/run/perdix"
+SYSFS_DRM = "/sys/class/drm"
+KILAVUZ = "/usr/local/lib/perdix/perdix_kilavuz.py"  # root-owned copy installed by the ISO build
+
+GOVERNORS = ("performance", "powersave", "schedutil", "ondemand", "conservative")
+TCP_ALGORITHMS = {"bbr": "fq", "cubic": "fq_codel", "reno": "fq_codel"}  # algorithm -> default qdisc
+IFACE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+MAX_RANGES = 16
+HUD_COLORS = ("orange", "white")
+HUD_POSITIONS = ("top-left", "bottom-right")
+# GPU profile -> amdgpu power_dpm_force_performance_level
+GPU_PROFILES = {"auto": "auto", "performance": "high", "powersave": "low"}
+# Background work paused while game mode is on (only those that are running are touched).
+PAUSABLE_UNITS = (
+    "clamav-freshclam.service",       # virus definition downloads
+    "man-db.timer",                   # man page index rebuild
+    "shadow.timer",                   # password database check
+    "archlinux-keyring-wkd-sync.timer",
+    "fstrim.timer",
+    "plocate-updatedb.timer",
+    "paccache.timer",
+    "reflector.timer",
+    "perdix-snapshot.timer",          # scheduled Timeshift snapshots (Recovery)
+)
+
+
+class UsageError(Exception):
+    pass
+
+
+def check_iface(name: str, sys_class_net: str = "/sys/class/net") -> str:
+    if not IFACE.match(name) or not os.path.isdir(os.path.join(sys_class_net, name)):
+        raise UsageError(f"unknown network interface: {name!r}")
+    return name
+
+
+def parse_limit(text: str) -> int:
+    if not text.isdigit() or not 1 <= int(text) <= 10000:
+        raise UsageError("download limit must be 1-10000 Mbit/s")
+    return int(text)
+
+
+def parse_ports(text: str) -> list[tuple[int, int]]:
+    """'27015-27050,7000' -> [(27015, 27050), (7000, 7000)]"""
+    ranges = []
+    for part in text.split(","):
+        bounds = part.strip().split("-")
+        if not 1 <= len(bounds) <= 2 or not all(b.strip().isdigit() for b in bounds):
+            raise UsageError(f"bad port range: {part!r}")
+        lo, hi = int(bounds[0]), int(bounds[-1])
+        if not 1 <= lo <= hi <= 65535:
+            raise UsageError(f"bad port range: {part!r}")
+        ranges.append((lo, hi))
+    if not 1 <= len(ranges) <= MAX_RANGES:
+        raise UsageError(f"give 1-{MAX_RANGES} port ranges")
+    return ranges
+
+
+def port_masks(lo: int, hi: int) -> list[tuple[int, int]]:
+    """Cover lo..hi with (value, mask) pairs for tc u32 matches (like CIDR blocks for ports)."""
+    blocks = []
+    while lo <= hi:
+        size = 1
+        while lo % (size * 2) == 0 and lo + size * 2 - 1 <= hi and size < 65536:
+            size *= 2
+        blocks.append((lo, 0xFFFF & ~(size - 1)))
+        lo += size
+    return blocks
+
+
+def governor_commands(governor: str) -> list[list[str]]:
+    if governor not in GOVERNORS:
+        raise UsageError(f"unknown governor: {governor!r}")
+    return [["cpupower", "frequency-set", "-g", governor]]
+
+
+def tcp_commands(algorithm: str) -> tuple[list[list[str]], list[list[str]]]:
+    """(required, best-effort). The fq default qdisc helps BBR pace but isn't required for it
+    (kernel 4.13+), and the setting doesn't exist inside network namespaces."""
+    if algorithm not in TCP_ALGORITHMS:
+        raise UsageError(f"unknown TCP congestion control: {algorithm!r}")
+    return ([["sysctl", "-w", f"net.ipv4.tcp_congestion_control={algorithm}"]],
+            [["sysctl", "-w", f"net.core.default_qdisc={TCP_ALGORITHMS[algorithm]}"]])
+
+
+def qos_off_commands(iface: str) -> list[list[str]]:
+    return [["tc", "qdisc", "del", "dev", iface, "root"],
+            ["tc", "qdisc", "del", "dev", iface, "ingress"]]
+
+
+def qos_on_commands(iface: str, limit_mbit: int, ports: list[tuple[int, int]]) -> list[list[str]]:
+    """Game UDP first, background downloads throttled.
+
+    Upload (egress): a 3-band priority queue. UDP packets to the game ports go to the top
+    band; everything else uses the normal bands. Each band runs fq_codel to keep queues short.
+    Download (ingress): only TCP (downloads, updates, streams) is policed to the limit, so it
+    can't fill the line and raise game latency; game UDP is never touched.
+    IPv4 only.
+    """
+    tc = ["tc"]
+    commands = [
+        [*tc, "qdisc", "add", "dev", iface, "root", "handle", "1:", "prio", "bands", "3"],
+        [*tc, "qdisc", "add", "dev", iface, "parent", "1:1", "handle", "10:", "fq_codel"],
+        [*tc, "qdisc", "add", "dev", iface, "parent", "1:2", "handle", "20:", "fq_codel"],
+        [*tc, "qdisc", "add", "dev", iface, "parent", "1:3", "handle", "30:", "fq_codel"],
+        [*tc, "qdisc", "add", "dev", iface, "handle", "ffff:", "ingress"],
+    ]
+    for lo, hi in ports:
+        for value, mask in port_masks(lo, hi):
+            commands.append([*tc, "filter", "add", "dev", iface, "parent", "1:", "protocol", "ip", "prio", "1",
+                             "u32", "match", "ip", "protocol", "17", "0xff",
+                             "match", "ip", "dport", str(value), f"0x{mask:04x}", "flowid", "1:1"])
+    burst_kb = max(32, limit_mbit * 125 // 10)  # about 10 ms of traffic at the limit
+    commands.append([*tc, "filter", "add", "dev", iface, "parent", "ffff:", "protocol", "ip", "prio", "10",
+                     "u32", "match", "ip", "protocol", "6", "0xff",
+                     "police", "rate", f"{limit_mbit}mbit", "burst", f"{burst_kb}k", "drop", "flowid", ":1"])
+    return commands
+
+
+# --- records and logs -----------------------------------------------------------------------------
+
+def conf_path(name: str) -> str:
+    return os.path.join(CONF_DIR, name)
+
+
+def read_conf(name: str) -> configparser.ConfigParser:
+    conf = configparser.ConfigParser()
+    conf.read(conf_path(name), encoding="utf-8")
+    return conf
+
+
+def record(name: str, section: str, values: dict[str, str]) -> None:
+    """Update keys in /etc/perdix/<name> (INI), keeping everything else."""
+    conf = read_conf(name)
+    if not conf.has_section(section):
+        conf.add_section(section)
+    for key, value in values.items():
+        conf.set(section, key, value)
+    os.makedirs(CONF_DIR, exist_ok=True)
+    tmp = conf_path(name) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(f"# PERDIX OS {name}: written by perdix-tune (PERDIX Control Center). Applied at boot by\n"
+                "# perdix-restore.service. Edit with care: values are validated when read.\n\n")
+        conf.write(f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, conf_path(name))
+
+
+def log(name: str, message: str) -> None:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(os.path.join(LOG_DIR, name), "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')} {message}\n")
+
+
+# --- game mode: background services, GPU profile -----------------------------------------------------
+
+def pause_services() -> list[str]:
+    """Stop the pausable units that are running; remember them for resume_services()."""
+    stopped = []
+    for unit in PAUSABLE_UNITS:
+        if subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0:
+            if subprocess.run(["systemctl", "stop", unit], capture_output=True).returncode == 0:
+                stopped.append(unit)
+    os.makedirs(RUN_DIR, exist_ok=True)
+    with open(os.path.join(RUN_DIR, "paused-units"), "a", encoding="utf-8") as f:
+        f.writelines(unit + "\n" for unit in stopped)
+    log("game_mode.log", "game mode: stopped " + (", ".join(stopped) if stopped else "nothing (no background services running)"))
+    return stopped
+
+
+def resume_services() -> list[str]:
+    path = os.path.join(RUN_DIR, "paused-units")
+    try:
+        with open(path, encoding="utf-8") as f:
+            units = [u for u in dict.fromkeys(line.strip() for line in f) if u in PAUSABLE_UNITS]
+    except FileNotFoundError:
+        units = []
+    started = [u for u in units if subprocess.run(["systemctl", "start", u], capture_output=True).returncode == 0]
+    if os.path.exists(path):
+        os.remove(path)
+    log("game_mode.log", "game mode: restarted " + (", ".join(started) if started else "nothing"))
+    return started
+
+
+def gpu_level_files() -> list[str]:
+    """amdgpu cards that accept a forced performance level (Intel and NVIDIA have no such knob)."""
+    return sorted(glob.glob(os.path.join(SYSFS_DRM, "card[0-9]*", "device", "power_dpm_force_performance_level")))
+
+
+def set_gpu_profile(profile: str) -> list[str]:
+    if profile not in GPU_PROFILES:
+        raise UsageError(f"unknown GPU profile: {profile!r}")
+    cards = []
+    for path in gpu_level_files():
+        with open(path, "w", encoding="ascii") as f:
+            f.write(GPU_PROFILES[profile])
+        cards.append(path.split(os.sep)[-3])
+    if not cards:
+        raise RuntimeError("no GPU with an adjustable power profile (supported: AMD amdgpu)")
+    return cards
+
+
+# --- network: default interface for restore -------------------------------------------------------------
+
+def default_interface(wait: float = 0) -> str:
+    deadline = time.monotonic() + wait
+    while True:
+        out = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            fields = line.split()
+            if fields[:1] == ["default"] and "dev" in fields:
+                return fields[fields.index("dev") + 1]
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(2)
+
+
+def plan(args: list[str]) -> tuple[list[list[str]], list[list[str]]]:
+    """(commands that must succeed, best-effort commands run first whose errors are ignored)"""
+    match args:
+        case ["governor", governor]:
+            return governor_commands(governor), []
+        case ["tcp", algorithm]:
+            return tcp_commands(algorithm)
+        case ["qos", "on", iface, limit, ports]:
+            iface = check_iface(iface)
+            return qos_on_commands(iface, parse_limit(limit), parse_ports(ports)), qos_off_commands(iface)
+        case ["qos", "off", iface]:
+            return [], qos_off_commands(check_iface(iface))
+    raise UsageError(__doc__.split("\n\n", 2)[2])
+
+
+def run_plan(commands: list[list[str]], cleanup: list[list[str]]) -> str:
+    """Run the commands; returns '' on success or an error message."""
+    for command in cleanup:
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for command in commands:
+        if shutil.which(command[0]) is None:
+            return f"{command[0]} is not installed"
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            return f"{' '.join(command)}: {result.stderr.strip()}"
+    return ""
+
+
+def restore() -> list[str]:
+    """Re-apply saved network and GPU settings after boot. Returns problems (empty = fine)."""
+    problems = []
+    conf, drivers = read_conf("perdix.conf"), read_conf("drivers.conf")
+    record("perdix.conf", "game_mode", {"competitor": "off"})  # a new boot ends any game-mode session
+    tcp = conf.get("network", "tcp", fallback="")
+    if tcp in TCP_ALGORITHMS:
+        if error := run_plan(*tcp_commands(tcp)):
+            problems.append(error)
+    if conf.get("network", "qos", fallback="off") == "on":
+        try:
+            limit = parse_limit(conf.get("network", "download_limit_mbit", fallback=""))
+            ports = parse_ports(conf.get("network", "game_ports", fallback=""))
+            iface = default_interface(wait=60)
+            if not iface:
+                raise UsageError("no network connection within 60 s")
+            if error := run_plan(qos_on_commands(check_iface(iface), limit, ports), qos_off_commands(iface)):
+                problems.append(error)
+        except UsageError as error:
+            problems.append(f"QoS not restored: {error}")
+    profile = drivers.get("gpu", "profile", fallback="auto")
+    if profile in GPU_PROFILES and profile != "auto":
+        try:
+            set_gpu_profile(profile)
+        except (RuntimeError, OSError) as error:
+            problems.append(f"GPU profile not restored: {error}")
+    return problems
+
+
+# --- updates ----------------------------------------------------------------------------------------------
+
+LIVE_MARKER = "/run/archiso"  # present on the live ISO, which runs from memory
+PACMAN_LOCK = "/var/lib/pacman/db.lck"
+TIMESHIFT_CONF = "/etc/timeshift/timeshift.json"
+
+
+def update_steps() -> list[list[str]]:
+    """The keyring first (a stale keyring is the usual reason an Arch upgrade fails), then everything."""
+    return [["pacman", "-Sy", "--noconfirm", "--needed", "--noprogressbar", "archlinux-keyring"],
+            ["pacman", "-Su", "--noconfirm", "--noprogressbar"]]
+
+
+def snapshot_command(comment: str) -> list[str]:
+    """An on-demand Timeshift snapshot. No --tags: on-demand ("O") is the default for --create, and
+    Timeshift 24.01 rejects an explicit "--tags O" as an unknown value. --quiet: without it the
+    console progress display of Timeshift 24.01 crashed mid-copy in testing."""
+    return ["timeshift", "--create", "--scripted", "--quiet", "--comments", comment]
+
+
+def reboot_needed(modules_dir: str = "/usr/lib/modules") -> bool:
+    """After a kernel upgrade the running kernel's modules are gone: a restart is needed."""
+    return not os.path.isdir(os.path.join(modules_dir, os.uname().release))
+
+
+def update(runner=subprocess.call, live_marker: str = LIVE_MARKER, lock: str = PACMAN_LOCK,
+           timeshift_conf: str = TIMESHIFT_CONF, modules_dir: str = "/usr/lib/modules") -> bool:
+    """Snapshot, then upgrade. pacman's own output goes straight to the caller. Returns whether a
+    restart is needed."""
+    if os.path.exists(live_marker):
+        raise UsageError("this is the live system: it runs from memory, so updates would be gone after a "
+                         "restart. Install PERDIX OS to keep it up to date")
+    if os.path.exists(lock):
+        raise RuntimeError("another update or installation is running (pacman is locked)")
+    log("update.log", "update started")
+    if shutil.which("timeshift") and not os.path.exists(timeshift_conf):
+        try:  # the first update sets snapshots up, so there is always a way back
+            setup_snapshots(timeshift_conf, live_marker=live_marker)
+        except (RuntimeError, OSError) as error:
+            log("update.log", f"snapshots could not be set up: {error}")
+    if os.path.exists(timeshift_conf) and shutil.which("timeshift"):
+        print("PERDIX: snapshot", flush=True)
+        if runner(snapshot_command("PERDIX: before update")) != 0:
+            log("update.log", "safety snapshot failed; nothing was updated")
+            raise RuntimeError("the safety snapshot failed, so nothing was updated")
+    for step in update_steps():
+        print("PERDIX: " + ("keyring" if "archlinux-keyring" in step else "upgrade"), flush=True)
+        code = runner(step)
+        if code != 0:
+            log("update.log", f"{' '.join(step)} failed with exit code {code}")
+            record("perdix.conf", "update", {"last": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                             "result": "failed"})
+            raise RuntimeError(f"pacman failed (exit code {code}); see /var/log/pacman.log")
+    restart = reboot_needed(modules_dir)
+    record("perdix.conf", "update", {"last": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                     "result": "ok", "reboot": "yes" if restart else "no"})
+    log("update.log", "update finished" + (", restart needed" if restart else ""))
+    print("PERDIX: done" + (" restart" if restart else ""), flush=True)
+    return restart
+
+
+# --- recovery (Timeshift) ------------------------------------------------------------------------------------
+
+TIMESHIFT_DEFAULTS = "/etc/timeshift/default.json"
+SNAPSHOT_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+# Kept out of every snapshot: the user's files (games, saves, documents stay as they are when the
+# system is restored) and what can be downloaded again.
+SNAPSHOT_EXCLUDES = ["/home/**", "/root/**", "/var/cache/pacman/pkg/**", "/swapfile", "/var/tmp/**"]
+
+
+def timeshift_config(root_uuid: str, btrfs: bool, defaults: dict | None = None) -> dict:
+    """Timeshift's settings (its own default.json, values are strings): snapshots on the system disk,
+    5 daily and 3 weekly kept (a systemd timer runs `timeshift --check`), plus every on-demand one."""
+    config = dict(defaults or {})
+    config.update({"backup_device_uuid": root_uuid, "parent_device_uuid": "", "do_first_run": "false",
+                   "btrfs_mode": "true" if btrfs else "false", "include_btrfs_home": "false",
+                   "stop_cron_emails": "true", "schedule_monthly": "false", "schedule_weekly": "true",
+                   "schedule_daily": "true", "schedule_hourly": "false", "schedule_boot": "false",
+                   "count_weekly": "3", "count_daily": "5", "exclude": list(SNAPSHOT_EXCLUDES)})
+    config.setdefault("exclude-apps", [])
+    return config
+
+
+def root_filesystem() -> tuple[str, bool]:
+    """(UUID of the filesystem / lives on, whether Timeshift's btrfs mode fits it: btrfs with / in
+    the @ subvolume, the layout Timeshift needs)."""
+    out = subprocess.run(["findmnt", "-J", "-o", "UUID,FSTYPE,OPTIONS", "/"], capture_output=True, text=True).stdout
+    try:  # JSON: an empty UUID can't shift the other columns
+        fs = json.loads(out)["filesystems"][0]
+    except (ValueError, KeyError, IndexError):
+        fs = {}
+    uuid, fstype, options = fs.get("uuid") or "", fs.get("fstype") or "", fs.get("options") or ""
+    if not uuid:
+        raise RuntimeError("could not find the system disk's UUID")
+    return uuid, fstype == "btrfs" and "subvol=/@" in options.split(",")
+
+
+def setup_snapshots(conf_path: str = TIMESHIFT_CONF, defaults_path: str = TIMESHIFT_DEFAULTS,
+                    live_marker: str = LIVE_MARKER) -> dict:
+    if os.path.exists(live_marker):
+        raise UsageError("the live system runs from memory: snapshots need PERDIX OS installed on a disk")
+    try:
+        with open(defaults_path, encoding="utf-8") as f:
+            defaults = json.load(f)
+    except (OSError, ValueError):
+        defaults = {}
+    uuid, btrfs = root_filesystem()
+    config = timeshift_config(uuid, btrfs, defaults)
+    os.makedirs(os.path.dirname(conf_path), exist_ok=True)
+    tmp = conf_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, conf_path)
+    log("recovery.log", f"Timeshift set up on {uuid} ({'btrfs' if btrfs else 'rsync'})")
+    return config
+
+
+def parse_timeshift_list(text: str) -> dict:
+    """`timeshift --list --scripted` -> {"device", "mode", "status", "free", "snapshots": [...]}."""
+    info: dict = {"device": "", "mode": "", "status": "", "free": "", "snapshots": []}
+    for line in text.splitlines():
+        key, sep, value = line.partition(" : ")
+        if sep and key.strip() in ("Device", "Mode", "Status"):
+            info[key.strip().lower()] = value.strip()
+            continue
+        match = re.match(r"^\d+ snapshots?, (.+) free$", line.strip())
+        if match:
+            info["free"] = match.group(1)
+            continue
+        match = re.match(r"^\d+\s+>?\s*(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\s+([OBHDWM]*)\s*(.*)$", line.strip())
+        if match:
+            info["snapshots"].append({"name": match.group(1), "tags": match.group(2),
+                                      "description": match.group(3).strip()})
+    return info
+
+
+def list_snapshots(runner=subprocess.run, conf_path: str = TIMESHIFT_CONF) -> dict:
+    if not os.path.exists(conf_path):
+        return {"configured": False, "device": "", "mode": "", "status": "", "free": "", "snapshots": []}
+    result = runner(["timeshift", "--list", "--scripted"], capture_output=True, text=True, timeout=120)
+    info = parse_timeshift_list(result.stdout)
+    info["configured"] = True
+    return info
+
+
+def check_comment(text: str) -> str:
+    if not 1 <= len(text) <= 60 or not text.isprintable():
+        raise UsageError("a snapshot comment is 1-60 printable characters")
+    return text
+
+
+def check_snapshot(name: str, runner=subprocess.run, conf_path: str = TIMESHIFT_CONF) -> str:
+    if not SNAPSHOT_NAME.match(name):
+        raise UsageError(f"not a snapshot name: {name!r}")
+    if name not in {s["name"] for s in list_snapshots(runner, conf_path)["snapshots"]}:
+        raise UsageError(f"no snapshot called {name}")
+    return name
+
+
+def restore_command(name: str) -> list[str]:
+    """--skip-grub: the boot loader is left as it is. Timeshift asks for ENTER at its prompts even
+    with --scripted --yes, so the caller feeds newlines on stdin."""
+    return ["timeshift", "--restore", "--snapshot", name, "--scripted", "--yes", "--skip-grub", "--quiet"]
+
+
+def snapshot(argv: list[str], runner=subprocess.run, conf_path: str = TIMESHIFT_CONF,
+             live_marker: str = LIVE_MARKER) -> int:
+    match argv:
+        case ["setup"]:
+            setup_snapshots(conf_path, live_marker=live_marker)
+            return 0
+        case ["list"]:
+            print(json.dumps(list_snapshots(runner, conf_path), ensure_ascii=False))
+            return 0
+        case [action, *_] if action in ("create", "delete", "restore") and os.path.exists(live_marker):
+            raise UsageError("the live system runs from memory: snapshots need PERDIX OS installed on a disk")
+        case [action, *_] if action in ("create", "delete", "restore") and not os.path.exists(conf_path):
+            raise UsageError("snapshots are not set up yet")
+        case ["create", comment]:
+            command = snapshot_command(check_comment(comment))
+            stdin = None
+        case ["delete", name]:
+            command = ["timeshift", "--delete", "--snapshot", check_snapshot(name, runner, conf_path),
+                       "--scripted", "--quiet"]
+            stdin = None
+        case ["restore", name]:
+            command = restore_command(check_snapshot(name, runner, conf_path))
+            stdin = "\n" * 20
+        case _:
+            raise UsageError(f"unknown snapshot command: {' '.join(argv)!r}")
+    log("recovery.log", " ".join(command[:4]))
+    result = runner(command, input=stdin, capture_output=True, text=True, timeout=6 * 3600)
+    if result.returncode != 0:
+        lines = [l for l in (result.stdout + result.stderr).splitlines() if l.startswith("E: ")]
+        raise RuntimeError(lines[-1][3:] if lines else f"timeshift failed (exit code {result.returncode})")
+    return 0
+
+
+def load_kilavuz():
+    """The installed perdix_kilavuz module (root-owned; never a path from the caller)."""
+    sys.dont_write_bytecode = True  # no __pycache__ next to the installed module
+    spec = importlib.util.spec_from_file_location("perdix_kilavuz", KILAVUZ)
+    if spec is None or not os.path.isfile(KILAVUZ):
+        raise RuntimeError(f"PERDIX Kılavuz is not installed ({KILAVUZ})")
+    kilavuz = importlib.util.module_from_spec(spec)
+    sys.modules["perdix_kilavuz"] = kilavuz
+    spec.loader.exec_module(kilavuz)
+    return kilavuz
+
+
+def harden(kilavuz=None, roots=None) -> list[dict]:
+    """Close the vulnerabilities PERDIX Kılavuz can fix safely.
+
+    The command line only says "harden": the files come from a fresh root scan of Kılavuz's
+    default folders, never from the caller (the parameters exist for tests). Only permission
+    fixes are applied (SUID programs are reported as manual), each on the exact file scanned."""
+    kilavuz = kilavuz or load_kilavuz()
+    report = kilavuz.run_audit(ports=False, permissions=True, roots=roots or kilavuz.DEFAULT_SCAN_ROOTS)
+    results = kilavuz.remediate(
+        report.sorted_findings(), apply=True, log_path=os.path.join(LOG_DIR, "kilavuz.log")
+    )
+    return [
+        {
+            "target": r.finding.target,
+            "severity": r.finding.severity,
+            "message": r.finding.message,
+            "status": r.status,
+            "detail": r.detail,
+        }
+        for r in results
+    ]
+
+
+def main(argv: list[str]) -> int:
+    try:
+        match argv:
+            case ["services", "pause" | "resume" as action]:
+                pause_services() if action == "pause" else resume_services()
+                return 0
+            case ["gpu", profile]:
+                cards = set_gpu_profile(profile)
+                record("drivers.conf", "gpu", {"profile": profile, "cards": " ".join(cards)})
+                log("game_mode.log", f"GPU profile: {profile} ({', '.join(cards)})")
+                return 0
+            case ["game-mode", "on" | "off" as state]:
+                record("perdix.conf", "game_mode", {"competitor": state})
+                log("game_mode.log", f"competitor mode {state}")
+                return 0
+            case ["hud", color, position]:
+                if color not in HUD_COLORS or position not in HUD_POSITIONS:
+                    raise UsageError(f"unknown HUD theme: {color!r} {position!r}")
+                record("perdix.conf", "hud", {"color": color, "position": position})
+                return 0
+            case ["restore"]:
+                for problem in restore():
+                    print(f"perdix-tune: {problem}", file=sys.stderr)
+                return 0
+            case ["harden"]:
+                print(json.dumps(harden(), ensure_ascii=False))
+                return 0
+            case ["update"]:
+                update()
+                return 0
+            case ["snapshot", *rest]:
+                return snapshot(rest)
+        commands, cleanup = plan(argv)
+    except UsageError as error:
+        print(f"perdix-tune: {error}", file=sys.stderr)
+        return 2
+    except (RuntimeError, OSError) as error:
+        print(f"perdix-tune: {error}", file=sys.stderr)
+        return 1
+    if error := run_plan(commands, cleanup):
+        print(f"perdix-tune: {error}", file=sys.stderr)
+        return 1
+    match argv:  # record what was applied
+        case ["governor", governor]:
+            record("perdix.conf", "game_mode", {"governor": governor})
+            log("game_mode.log", f"CPU governor: {governor}")
+        case ["tcp", algorithm]:
+            record("perdix.conf", "network", {"tcp": algorithm})
+        case ["qos", "on", _iface, limit, ports]:
+            record("perdix.conf", "network", {"qos": "on", "download_limit_mbit": limit, "game_ports": ports})
+        case ["qos", "off", _iface]:
+            record("perdix.conf", "network", {"qos": "off"})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

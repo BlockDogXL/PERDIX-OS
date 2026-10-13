@@ -1,0 +1,6 @@
+Timezone=Europe/Istanbul
+LocalRTC=no
+CanNTP=no
+NTP=no
+NTPSynchronized=no
+TimeUSec=Mon 2026-10-12 16:10:07 +03

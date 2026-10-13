@@ -1,0 +1,9 @@
+[Unit]
+Description=PERDIX OS scheduled system snapshots (checked every hour; game mode pauses this timer)
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

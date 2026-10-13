@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Lets pkexec run /usr/local/bin/perdix-tune (CPU governor, TCP congestion control, QoS).
+     The kiosk user is allowed without a password by /etc/polkit-1/rules.d/50-kiosk-power.rules. -->
+<policyconfig>
+  <action id="org.perdix.tune">
+    <description>Change PERDIX performance and network tuning</description>
+    <message>Authentication is required to change system performance and network tuning</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/perdix-tune</annotate>
+  </action>
+</policyconfig>

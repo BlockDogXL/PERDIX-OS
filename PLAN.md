@@ -34,8 +34,8 @@ general-purpose desktop.
 | Silent boot | Kernel `quiet` flags + **Plymouth** splash + hidden bootloader menu | Hides kernel/systemd text from power-on to the shell. |
 | Bootloader | **systemd-boot** (UEFI) | Minimal; `timeout 0` hides the menu (hold Space to show it for maintenance). |
 | Kernel | `linux-zen` (fallback: `linux`) | Desktop/gaming tuned scheduler; stock kernel kept as a fallback entry. |
-| Audio | PipeWire (+ `pipewire-pulse`, `lib32-pipewire`) | What Steam/Proton expect today. |
-| Network | NetworkManager (shell drives it via `nmcli`/D-Bus) | Wi-Fi setup from inside the shell. |
+| Audio | PipeWire (+ `pipewire-pulse`, `lib32-pipewire`), WirePlumber, EasyEffects | What Steam/Proton expect today; EasyEffects for one-click effects. |
+| Network | NetworkManager + `nmcli` (Control Center module 06 drives it) | Wi-Fi setup from inside the shell; Ethernet comes up on its own (DHCP). |
 | Gamepad in shell | `python-evdev` | Reads controllers directly; maps to Qt key events. |
 | Proton | Steam's built-in Proton; optional **Proton-GE** | Steam Play handles Windows titles; GE for extra compatibility. |
 
@@ -101,7 +101,8 @@ UEFI
 1. `steps/60-silent-boot.sh`:
    - Kernel cmdline: `quiet splash loglevel=3 rd.udev.log_level=3
      systemd.show_status=auto vt.global_cursor_default=0`.
-   - Install `plymouth`, add the `plymouth` hook to `mkinitcpio.conf`, set the
+   - Install `packages/boot.txt` (`plymouth`) and the **Piri theme** (`rootfs/usr/share/plymouth/themes/perdix`,
+     see `branding/BRANDING.md`), add the `plymouth` hook to `mkinitcpio.conf`, set the
      custom theme, regenerate the initramfs.
    - systemd-boot `loader.conf`: `timeout 0`, `console-mode keep`.
    - Leave `getty@tty2..6` alone: VT switching is disabled in Xorg instead (§Phase 6),
@@ -111,17 +112,47 @@ UEFI
 ### Phase 5 — The desktop shell (PyQt5)
 1. `steps/70-shell.sh` — install `python-pyqt5 python-evdev python-dbus`, copy
    `shell/` to `/opt/kiosk-shell`, install `kiosk-session` to `/usr/local/bin`.
-2. Shell features, in build order:
-   1. Full-screen frameless window, cursor hidden on gamepad use, theme loader.
-   2. Home screen: big tiles — **Steam**, **Settings**, **Power**.
-   3. Launcher service: start Steam (`steam -gamepadui`), hide/minimise the shell while
-      it runs, restore when the process exits.
+2. Shell features, in build order (`[x]` = in `kiosk_shell/main_desktop.py`):
+   1. [x] Full-screen frameless window that ignores close requests (Alt+F4, WM close,
+      Ctrl+C) and re-enters full screen if minimised. Black + neon-blue theme, animated logo.
+   2. [x] Home screen tiles: **Open Games (Steam)**, **My Files** (browser locked to the home
+      folder; double-clicking a document opens it in LibreOffice or Krita), **Office**
+      (LibreOffice: opens and saves .docx/.xlsx/.pptx and OpenDocument in their own format),
+      **Çizim Stüdyosu** (Krita, with its MyPaint brush engine), **Antivirus Scan** (ClamAV `clamscan` on the home folder;
+      `clamav-freshclam.service` keeps definitions current), **Shut Down System**
+      (confirm dialog with Shut Down / Restart / Cancel).
+   3. [x] Launcher service: start Steam (`KIOSK_STEAM_CMD`, default `steam -gamepadui`); the
+      shell stays underneath, pauses its animation, and comes back to the front on exit.
    4. Gamepad navigation (`input/gamepad.py`, evdev → Qt key events).
-   5. Settings: Wi-Fi (NetworkManager D-Bus), volume (`wpctl`), resolution (`xrandr`).
-   6. Power menu: `systemctl poweroff/reboot` (allowed by the polkit rule).
+   5. Settings: [x] Wi-Fi and Ethernet (Control Center → Network Settings, `nmcli`; polkit lets the
+      kiosk user join networks), [x] sound (Control Center → Audio: PipeWire devices and volume
+      through `wpctl`, one-click EasyEffects volume boost / bass boost / mic noise suppression),
+      resolution (`xrandr`).
+   5b. [x] PERDIX Vision (Control Center → Vision): TacticalVision-style picture tuning for games.
+      Steam runs inside gamescope; colour (brightness, contrast, vibrance, lift/gamma/gain and an
+      imported .cube LUT) is baked into one 3D LUT set through GAMESCOPE_COLOR_LOOK_G22, sharpening
+      is a CAS ReShade effect (GAMESCOPE_RESHADE_EFFECT); both change live.
+   6. [x] Power: `systemctl poweroff/reboot` (allowed by the polkit rule).
+   6b. [x] Branding: Piri (neon blue) in the centre, Piri icon top-left opening an
+       **About System** page (version from `/etc/perdix-release`, kernel, architecture,
+       CPU, GPU, memory).
    7. Optional: list installed Steam games by parsing `steamapps/*.acf` and launch
       them directly with `steam steam://rungameid/<appid>`.
-3. `kiosk-session` wraps the shell in a restart loop with crash back-off and logs
+3. **PERDIX Control Center** (`shell/kiosk_shell/perdix_hub.py`): frameless esports hub, graphite
+   with neon-orange / ice-blue accents. Modules:
+   - 01 Sens & Accel: Raw Accel-style curves (Off / Linear / Natural / Classic) sent to libinput's
+     custom acceleration profile through xinput as you change them, with a live graph; saved to
+     `~/.config/perdix-os/settings.json` and re-applied at login (`perdix_hub --apply-saved` in `.xinitrc`).
+     eDPI / cm-per-360 calculator and game-to-game converter.
+   - 02 Tactical Scope: crosshair designer + overlay (X11 shape mask, click-through); zoom key
+     watched with evdev, zooming the screen centre with `xrandr --transform` (Hyprland: `hyprctl`).
+   - 03 Macro Studio: key / text / delay macros, JSON, played on a uinput virtual keyboard.
+   - 04 Game Mode & HUD: ULTRA FPS / COMPETITOR MODE (`gamemoded -r`, CPU governor `performance`,
+     vsync-off env for Steam) and the PERDIX HUD theme engine editing `MangoHud.conf` in place.
+   - 05 Network (Zero-Ping): BBR + a `tc` policy (game UDP ports first, TCP downloads policed).
+   Root changes go through `pkexec /usr/local/bin/perdix-tune`, a validated helper the kiosk
+   user may run without a password (polkit action `org.perdix.tune`).
+4. `kiosk-session` wraps the shell in a restart loop with crash back-off and logs
    to `~/.local/state/kiosk/shell.log`.
 
 ### Phase 6 — Lockdown
@@ -134,10 +165,47 @@ UEFI
      and no autologin — see §7).
 
 ### Phase 7 — Packaging (ISO)
-1. `archiso/` — copy the `releng` profile, add our package lists, `rootfs/` as
-   `airootfs/`, and an unattended installer.
-2. Build with `mkarchiso -v -w /tmp/work -o out/ archiso/`.
+1. **Live ISO (script written, not yet test-built):** `sudo tools/build-iso.sh [--nvidia] [--root-password]` on an Arch host
+   with `archiso` ≥ 86. It stages `archiso/` + `rootfs/` + `skel/` + `shell/` into
+   `work/profile`, merges `archiso/packages.live.txt` with `install/packages/{base,boot,gaming,
+   gpu-amd,gpu-intel,shell}.txt`, and runs `mkarchiso`. Output: `out/perdix-os-<date>-x86_64.iso`.
+   - Boots BIOS (syslinux) and UEFI (systemd-boot) with no menu, quiet cmdline and Plymouth.
+   - User `kiosk` (UID 1000, locked password) is created by `etc/sysusers.d/kiosk.conf` and
+     autologged in on tty1 → startx → shell. Root is locked unless `--root-password`.
+   - Maintenance: hold Space (UEFI) or Shift then type `maintenance` (BIOS) → console, no X.
+   - No desktop environment: only Xorg + Openbox + the PyQt5 shell.
+   - Live limits: everything written (Steam client, games) lives in a 4 GB RAM overlay and is
+     lost on reboot. Proton is not a pacman package; Steam downloads it on first use.
+   - `build_iso.sh` (repo root) is a standalone alternative: it starts from Arch's releng
+     profile, writes its config inline and only copies `shell/kiosk_shell` from the repo.
+2. **Installer ISO (todo):** add an unattended installer that partitions a disk and runs
+   `install/install.sh` in a chroot, so Steam and games persist.
 3. Test the ISO in the VM, then on real AMD/Intel/NVIDIA hardware.
+
+### Phase 8 — System tools (sub-plan; built one item at a time, one commit each)
+
+The Control Center grows from 9 to 20 modules, so first (step 0) its menu gets group headings
+(Gaming · System · Media · Maintenance) and scrolls. Every item below is a module of
+`perdix_hub.py` with its logic in `kiosk_shell/services/`, tests in `shell/tests/`, and anything
+that needs root goes through `perdix-tune` (validated arguments, pkexec, polkit) or a narrow
+polkit rule for a system service. Status: `[ ]` todo, `[x]` done.
+
+| # | Module | How | Packages | Root / limits | Verified by |
+|---|---|---|---|---|---|
+| 1 | [x] Task Manager | `psutil` for CPU, RAM, per-process use; GPU from amdgpu sysfs (`gpu_busy_percent`, VRAM) or `nvidia-smi`; "Not responding" = the window ignores the EWMH `_NET_WM_PING` (what Windows calls a hung window); End task = SIGTERM, then SIGKILL | python-psutil | own processes only; the desktop shell and system processes are protected | psutil on this machine; ping on a real X server with a responsive and a frozen window |
+| 2 | [x] Devices | `lspci -k` (driver in use, modules), `lsusb`, `/proc/bus/input/devices` (keyboards, mice), DMI for the motherboard | pciutils, usbutils | none | parsers against real command output |
+| 3 | [x] System Diagnostics | GPU, driver, Vulkan (`vulkaninfo --summary`), OpenGL (`glxinfo -B`), DirectX = what DXVK / VKD3D-Proton can offer on that Vulkan version (Linux has no native DirectX), RAM, BIOS (DMI), exportable report | vulkan-tools, mesa-utils | none | real tool output where available |
+| 4 | [x] Region & Language | `timedatectl` (zone, NTP), `localectl` (X11 keyboard layout, system language) + `setxkbmap` for the running session | (systemd) | polkit rule for timedate1/locale1 actions; only generated locales | parsers; commands recorded |
+| 5 | [x] Bluetooth | `bluetoothctl` (scan, pair, trust, connect, remove); Blueman as the full tool | bluez, bluez-utils, blueman | kiosk user allowed by BlueZ's D-Bus policy / polkit | parser against real bluetoothctl output; no radio here |
+| 6 | [x] Screen & audio sharing | PERDIX runs Xorg, where Discord/OBS/browsers capture the screen directly; the module checks the pieces (PipeWire, portals) and adds a "stream mix": a PipeWire virtual microphone carrying game audio + mic for Discord | xdg-desktop-portal, -gtk | no root | real PipeWire with virtual devices |
+| 7 | [x] Camera & microphone test | `v4l2-ctl` (devices, formats/resolutions, controls) + live preview; microphone level meter from PipeWire and gain via `wpctl` | v4l-utils | none | parsers; PipeWire with a virtual mic |
+| 8 | [x] Game recording | OBS Studio (libobs) running in the background, driven over obs-websocket 5; hardware encoder (VAAPI / NVENC) so the game keeps its FPS; F9 through the existing evdev key watcher | obs-studio | input group already granted | websocket protocol against a test server; real FPS cost needs hardware |
+| 9 | [x] Lossless video cutter | the LosslessCut approach: `ffmpeg -c copy` cut and concat (no re-encode), with a preview player | ffmpeg | none | real ffmpeg on generated clips |
+| 10 | [x] Smart updater | `checkupdates` (safe: separate database copy), update through `perdix-tune update` after a snapshot (item 11), neon-orange notification on the desktop | pacman-contrib | perdix-tune | commands recorded; live ISO cannot keep updates |
+| 11 | [x] Recovery center | Timeshift snapshots: create, list, restore, delete; automatic snapshot before updates | timeshift | perdix-tune | commands recorded; restore needs an installed system |
+
+Network access to archlinux.org is blocked in the development environment, so package names
+that could not be checked against the Arch repositories are listed in each item's commit.
 
 ---
 
@@ -157,7 +225,7 @@ UEFI
 | `install/steps/80-lockdown.sh` | Xorg flags, Openbox config, polkit, sysctl. |
 | `rootfs/usr/local/bin/kiosk-session` | Restart loop around the shell. |
 | `tools/run-shell-dev.sh` | Run the shell windowed on a dev machine. |
-| `tools/build-iso.sh` | Wrapper around `mkarchiso`. |
+| `tools/build-iso.sh` | Assemble the archiso profile and build the live ISO (see Phase 7). |
 
 All step scripts must be **idempotent** (safe to run twice) and use `set -euo pipefail`.
 
@@ -169,11 +237,14 @@ All step scripts must be **idempotent** (safe to run twice) and use `set -euo pi
 perdix-os/
 ├── PLAN.md                     ← this file
 ├── README.md
+├── build_iso.sh                ← standalone ISO build from Arch's releng profile
 ├── install/
 │   ├── install.sh              ← entry point (run as root)
 │   ├── lib/common.sh
 │   ├── packages/               ← one package per line, '#' comments allowed
+│   │   ├── admin.txt           ← installed system only (base-devel, git)
 │   │   ├── base.txt
+│   │   ├── boot.txt
 │   │   ├── gaming.txt
 │   │   ├── gpu-amd.txt
 │   │   ├── gpu-intel.txt
@@ -203,16 +274,63 @@ perdix-os/
 │   ├── pyproject.toml
 │   ├── kiosk_shell/
 │   │   ├── __main__.py
-│   │   ├── app.py
-│   │   ├── ui/                 ← screens and widgets
-│   │   ├── services/           ← launcher, power, network, audio
+│   │   ├── main_desktop.py     ← the desktop UI (home, files, scan, shutdown dialog)
+│   │   ├── config.py           ← reads /etc/kiosk/kiosk.conf
+│   │   ├── perdix_hub.py       ← PERDIX Control Center (esports tuning hub)
+│   │   ├── services/           ← launcher, power, antivirus, system info; hub: mouse, macros,
+│   │   │                          hud, competitor, tuning, magnifier, keywatch, hub_settings
 │   │   ├── input/              ← gamepad handling
 │   │   └── resources/          ← icons, themes (QSS)
 │   └── tests/
-├── archiso/                    ← ISO profile (Phase 7)
+├── branding/                   ← Piri logo master + generated variants, BRANDING.md
+├── archiso/                    ← ISO profile (Phase 7), staged by tools/build-iso.sh
+│   ├── profiledef.sh           ← ISO name, boot modes, file ownership (kiosk = UID 1000)
+│   ├── pacman.conf             ← build-time repos, incl. [multilib]
+│   ├── packages.live.txt       ← kernel, firmware, live-boot hooks, NVK
+│   ├── packages.nvidia.txt     ← proprietary NVIDIA driver (--nvidia)
+│   ├── efiboot/loader/         ← systemd-boot: hidden menu, kiosk + maintenance entries
+│   ├── syslinux/syslinux.cfg   ← BIOS boot, same two entries
+│   └── airootfs/etc/           ← ISO-only files: sysusers kiosk user, mkinitcpio hooks, ...
 ├── tools/                      ← dev helpers
 └── docs/                       ← hardware notes, troubleshooting
 ```
+
+---
+
+## 6b. Runtime flow and file layout
+
+**From power-on to a game**
+
+1. `build_iso.sh` (or `tools/build-iso.sh`) builds an Arch ISO with Python/PyQt5, Mesa/Vulkan
+   (and NVIDIA with `--nvidia`), Steam and the PERDIX files. The boot menu and kernel text are
+   hidden; Plymouth shows the Piri splash instead.
+2. tty1 logs the `kiosk` user in; `.bash_profile` starts X; `.xinitrc` sets the cursor, re-applies
+   the mouse curve, starts Openbox and runs `main_desktop.py` full screen, restarting it if it exits.
+3. **Open Games (Steam)** starts `steam -gamepadui` (Steam's console-style Big Picture UI), with
+   Competitor Mode's environment added while that mode is on. When Steam exits, the session's
+   MangoHud log is summarised into `perf.log`.
+4. **Control Center** starts `perdix_hub.py` as its own process. Everything it changes as root
+   (CPU governor, BBR, `tc` QoS, GPU profile, paused services) goes through
+   `pkexec /usr/local/bin/perdix-tune`, which validates every argument and records the result.
+
+**Files** (all paths in `shell/kiosk_shell/paths.py`)
+
+| Path | Written by | Contents |
+|---|---|---|
+| `/etc/perdix/perdix.conf` | perdix-tune (root) | INI: `[game_mode]` competitor, governor · `[network]` tcp, qos, download_limit_mbit, game_ports · `[hud]` color, position |
+| `/etc/perdix/drivers.conf` | perdix-tune (root) | INI: `[gpu]` profile (auto / performance / powersave), cards |
+| `/var/log/perdix/game_mode.log` | perdix-tune (root) | Competitor Mode on/off, governor, GPU profile, which background services were stopped and restarted |
+| `/var/log/perdix/perf.log` | desktop / Control Center (group `perdix`) | One line per game session: avg FPS, 1 % low FPS, average and 99th-percentile frame time |
+| `/var/log/perdix/mangohud/` | MangoHud (group `perdix`) | Raw session logs perf.log is made from; kept 7 days after summarising |
+| `~/.config/perdix-os/theme.json` | user | Accent colours: orange, ice, blue (desktop neon) |
+| `~/.config/perdix-os/cursor.conf` | user / make-cursor-theme.py | `XCURSOR_THEME`, `XCURSOR_SIZE`, read by `.xinitrc` |
+| `~/.config/perdix-os/settings.json` | Control Center | Mouse curve, crosshair, zoom key, HUD layout, network form |
+| `~/.config/perdix-os/macros.json` | Macro Studio | Macros |
+| `~/.config/perdix-os/competitor.{json,env}` | Competitor Mode | State (ends with the boot) and the game environment for Steam |
+
+`/etc/tmpfiles.d/perdix.conf` creates the system folders, `/etc/sysusers.d/perdix.conf` the
+`perdix` group, and `perdix-restore.service` re-applies `perdix.conf` / `drivers.conf` at boot
+(BBR, QoS, GPU profile; game mode always starts off).
 
 ---
 
@@ -238,7 +356,8 @@ A kiosk with no escape hatch is a brick when something breaks. Plan:
 - [ ] Steam launches in gamepad UI, returns to the shell on exit.
 - [ ] A Proton title (e.g. a free Windows-only game) runs.
 - [ ] Gamepad can navigate every shell screen.
-- [ ] Wi-Fi can be joined from Settings.
+- [ ] Wi-Fi can be joined from Control Center → Network Settings (needs real Wi-Fi hardware).
+- [ ] A network cable works with no action, and again after unplugging and replugging.
 - [ ] Power off / reboot from the shell works without a password.
 - [ ] Maintenance boot entry gives a console login.
 

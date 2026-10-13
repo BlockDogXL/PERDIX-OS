@@ -1,7 +1,7 @@
 # Core system, display and audio
-base-devel
-git
 networkmanager
+wpa_supplicant
+polkit
 xorg-server
 xorg-xinit
 xorg-xrandr
@@ -13,5 +13,7 @@ pipewire-alsa
 wireplumber
 lib32-pipewire
 noto-fonts
+# Text/resize/busy cursors for the PERDIX-Feather theme (it inherits Adwaita)
+adwaita-cursors
 ttf-liberation
 pciutils

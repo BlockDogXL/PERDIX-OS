@@ -3,4 +3,51 @@ python
 python-pyqt5
 python-evdev
 python-dbus
-plymouth
+clamav
+# PERDIX Control Center: mouse curves, zoom key, root helper (pkexec)
+xorg-xinput
+xorg-xrandr
+polkit
+# Control Center "Audio": EasyEffects for one-click effects (volume boost uses an LSP limiter,
+# bass boost the Calf bass enhancer, mic noise suppression RNNoise, which EasyEffects pulls in);
+# rtkit gives PipeWire real-time priority for low, steady latency.
+easyeffects
+calf
+lsp-plugins-lv2
+rtkit
+# Control Center "Vision": games run in gamescope, which applies the colour LUT and the
+# sharpening effect; python-xlib sets gamescope's properties live; numpy builds the LUT.
+gamescope
+python-xlib
+python-numpy
+# Control Center "Task Manager": CPU, memory and process figures
+python-psutil
+# Control Center "Devices": USB device names (pciutils for lspci is in base.txt)
+usbutils
+# Control Center "Diagnostics": vulkaninfo and glxinfo
+vulkan-tools
+mesa-utils
+# Control Center "Bluetooth": bluetoothd, bluetoothctl and Blueman; pipewire-audio carries
+# PipeWire's Bluetooth audio plugin (headphones and speakers as sound outputs).
+bluez
+bluez-utils
+blueman
+pipewire-audio
+# Control Center "Sharing": the desktop portal (Flatpak apps, file dialogs; ScreenCast on Wayland).
+# Screen capture itself is plain X11 on PERDIX; the stream mix only needs PipeWire (base.txt).
+xdg-desktop-portal
+xdg-desktop-portal-gtk
+# Control Center "Camera & Mic": v4l2-ctl for camera formats and picture settings; ffmpeg reads
+# the camera for the preview (pw-record/wpctl for the microphone come with PipeWire).
+v4l-utils
+ffmpeg
+# Control Center "Game Recording": OBS Studio, driven over its built-in obs-websocket 5. GPU
+# encoding needs the VA-API driver (mesa for AMD, intel-media-driver for Intel) or NVIDIA's.
+obs-studio
+# Control Center "Updates": checkupdates (a private database copy, so a check never changes the
+# system); notify-send for PERDIX notifications (the desktop is the notification server).
+pacman-contrib
+libnotify
+# Control Center "Recovery": Timeshift system snapshots (rsync, or btrfs with the @ layout),
+# scheduled by perdix-snapshot.timer and taken before every update.
+timeshift

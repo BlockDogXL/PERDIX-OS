@@ -1,0 +1,10 @@
+HD Pro Webcam C920 (usb-0000:00:14.0-1):
+	/dev/video0
+	/dev/video1
+	/dev/media0
+
+Integrated Camera: Integrated C (usb-0000:00:14.0-8):
+	/dev/video2
+	/dev/video3
+	/dev/media1
+

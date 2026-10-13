@@ -6,7 +6,9 @@ source "$(dirname "$0")/../lib/common.sh"
 
 # TODO: add "quiet splash loglevel=3 rd.udev.log_level=3 systemd.show_status=auto vt.global_cursor_default=0"
 #       to the systemd-boot entries in /boot/loader/entries/*.conf
-# TODO: add the plymouth hook to /etc/mkinitcpio.conf, set the theme, mkinitcpio -P
+# TODO: pacman_install_list boot
+# TODO: install_rootfs_file for usr/share/plymouth/themes/perdix/* and etc/plymouth/plymouthd.conf
+#       (Theme=perdix), add the plymouth hook to /etc/mkinitcpio.conf, mkinitcpio -P
 # TODO: /boot/loader/loader.conf: timeout 0, console-mode keep
 # TODO: add the hidden "Maintenance" boot entry (PLAN.md §7)
 warn "60-silent-boot: not implemented yet"

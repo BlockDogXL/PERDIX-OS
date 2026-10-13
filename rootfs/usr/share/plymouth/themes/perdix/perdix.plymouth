@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=PERDIX
+Description=Piri: red-and-white logo at power-on, then glowing orange while the system loads and shuts down.
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/perdix
+ScriptFile=/usr/share/plymouth/themes/perdix/perdix.script

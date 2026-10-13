@@ -1,4 +1,6 @@
-// Let the kiosk user power off, reboot and suspend without a password — nothing else.
+// The kiosk user may, without a password: power off, reboot and suspend, run
+// /usr/local/bin/perdix-tune (CPU governor, TCP congestion control, QoS, hardening) through
+// pkexec, and manage Wi-Fi through NetworkManager. Nothing else.
 polkit.addRule(function (action, subject) {
     var allowed = [
         "org.freedesktop.login1.power-off",
@@ -6,6 +8,20 @@ polkit.addRule(function (action, subject) {
         "org.freedesktop.login1.reboot",
         "org.freedesktop.login1.reboot-multiple-sessions",
         "org.freedesktop.login1.suspend",
+        "org.perdix.tune",
+        // Network Settings in the Control Center (nmcli): join, scan, disconnect and forget
+        // Wi-Fi networks and turn the radio on or off. Saving a Wi-Fi password writes a
+        // system profile, which NetworkManager otherwise reserves for administrators.
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.settings.modify.system",
+        "org.freedesktop.NetworkManager.settings.modify.own",
+        "org.freedesktop.NetworkManager.enable-disable-wifi",
+        "org.freedesktop.NetworkManager.wifi.scan",
+        // Region & Language in the Control Center: time zone, internet time, keyboard, language.
+        "org.freedesktop.timedate1.set-timezone",
+        "org.freedesktop.timedate1.set-ntp",
+        "org.freedesktop.locale1.set-locale",
+        "org.freedesktop.locale1.set-keyboard",
     ];
     if (subject.user === "kiosk" && allowed.indexOf(action.id) >= 0) {
         return polkit.Result.YES;

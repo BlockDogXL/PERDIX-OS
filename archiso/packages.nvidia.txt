@@ -1,0 +1,5 @@
+# Proprietary NVIDIA driver for the live ISO (build-iso.sh --nvidia).
+# Prebuilt for the "linux" kernel, so no DKMS build at boot. Turing (GTX 16xx / RTX 20xx) and newer.
+nvidia-open
+nvidia-utils
+lib32-nvidia-utils

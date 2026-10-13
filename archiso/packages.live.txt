@@ -1,0 +1,14 @@
+# Packages only the live ISO needs, on top of install/packages/{base,boot,gaming,gpu-*,shell}.txt.
+# Kernel and live-boot machinery
+base
+linux
+linux-firmware
+mkinitcpio
+mkinitcpio-archiso
+syslinux
+amd-ucode
+intel-ucode
+# Audio firmware for most recent laptops
+sof-firmware
+# Mesa Vulkan driver for NVIDIA (NVK). Use --nvidia for the proprietary driver instead.
+vulkan-nouveau

@@ -4,8 +4,12 @@
 set -euo pipefail
 source "$(dirname "$0")/../lib/common.sh"
 
-# TODO: pacman_install_list shell
+# TODO: pacman_install_list shell; pacman_install_list office
 # TODO: rsync shell/kiosk_shell to /opt/kiosk-shell/
 # TODO: install_rootfs_file usr/local/bin/kiosk-session 0755
 # TODO: install_rootfs_file etc/kiosk/kiosk.conf
+# TODO: write /etc/perdix-release (VERSION=..., EDITION="Installed") for the About System page
+# TODO: systemctl enable clamav-freshclam.service (virus definitions for the Antivirus Scan page)
+# TODO: systemctl enable bluetooth.service (Control Center "Bluetooth" page)
+# TODO: systemctl enable perdix-snapshot.timer (Recovery; does nothing until Timeshift is set up)
 warn "70-shell: not implemented yet"
