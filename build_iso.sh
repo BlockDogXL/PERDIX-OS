@@ -68,6 +68,10 @@ sed -i -e 's/^iso_name=.*/iso_name="perdix-os"/' \
 # --- [multilib]: Steam and the 32-bit drivers live there ---------------------------------------
 sed -i '/^#\[multilib\]$/,/^#Include/ s/^#//' "$PROFILE/pacman.conf"
 grep -q '^\[multilib\]$' "$PROFILE/pacman.conf" || die "could not enable [multilib] in pacman.conf"
+# Slow or stalling mirrors: don't give up on a download after 10 quiet seconds, and fetch fewer
+# files at once (a stalled mirror otherwise fails the whole package installation).
+sed -i -e '/^\[options\]/a DisableDownloadTimeout' -e 's/^#\?ParallelDownloads.*/ParallelDownloads = 3/' \
+    "$PROFILE/pacman.conf"
 
 # --- Packages ---------------------------------------------------------------------------------
 msg "Adding packages..."
