@@ -280,6 +280,9 @@ printf 'VERSION="%s"\nEDITION="Live ISO"\n' "$(date +%Y.%m.%d)" >"$AIROOTFS/etc/
 # The PERDIX feather cursor theme (symlinks included).
 mkdir -p "$AIROOTFS/usr/share/icons"
 cp -a -- "$REPO_DIR/rootfs/usr/share/icons/PERDIX-Feather" "$AIROOTFS/usr/share/icons/"
+# Default desktop wallpapers (grey partridges, Perdix perdix), shown in turn by the desktop.
+mkdir -p "$AIROOTFS/usr/share/backgrounds"
+cp -a -- "$REPO_DIR/rootfs/usr/share/backgrounds/perdix" "$AIROOTFS/usr/share/backgrounds/"
 # The PERDIX file layout: /etc/perdix and /var/log/perdix (tmpfiles), the 'perdix' log-writer
 # group (sysusers), and perdix-restore.service, which re-applies saved tuning at boot.
 for file in usr/local/bin/perdix-tune \

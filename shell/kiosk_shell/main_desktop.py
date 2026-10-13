@@ -1,6 +1,7 @@
 """PERDIX OS desktop: the full-screen home screen the kiosk boots into.
 
-Black and neon-blue interface with Piri, the PERDIX mascot, glowing in the centre and
+Neon-blue interface over a wallpaper (PERDIX partridge photos by default, one every 30 minutes;
+see services/wallpaper.py) with Piri, the PERDIX mascot, glowing in the centre and
 seven actions: Open Games (Steam), My Files, Office (LibreOffice), Çizim Stüdyosu (Krita), Antivirus
 Scan, Control Center (the PERDIX Control Center, perdix_hub.py) and Shut Down System. The Piri
 icon in the top-left corner opens the About System page. The neon colour comes from
@@ -42,6 +43,7 @@ from PyQt5.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QRadialGradient,
 )
 from PyQt5.QtWidgets import (
@@ -66,7 +68,7 @@ from PyQt5.QtWidgets import (
 from kiosk_shell.config import load_config
 from kiosk_shell.services import power
 from kiosk_shell.services.antivirus import ScanResult, VirusScanner
-from kiosk_shell.services import apps, competitor, perflog, system_info, theme
+from kiosk_shell.services import apps, competitor, perflog, system_info, theme, wallpaper
 from kiosk_shell.services.launcher import AppLauncher
 
 DEV_MODE = os.environ.get("KIOSK_DEV") == "1"
@@ -242,23 +244,104 @@ def icon_path(kind: str) -> QPainterPath:
 
 
 class Backdrop(QWidget):
-    """Black background with a faint blue grid and a glow behind the logo."""
+    """The wallpaper (a PERDIX partridge photo by default, changing every 30 minutes with a slow
+    cross-fade) under a dark veil that keeps the neon tiles readable, and a blue glow behind the
+    logo. With wallpapers switched off: black with a faint blue grid."""
+
+    FADE_MS = 1800
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._images: list[str] = []
+        self._index = -1
+        self._current: QPixmap | None = None
+        self._previous: QPixmap | None = None
+        self._cache: dict[tuple[int, int, int], QPixmap] = {}
+        self._fade = 1.0
+        self._animation = QVariantAnimation(self, startValue=0.0, endValue=1.0, duration=self.FADE_MS)
+        self._animation.valueChanged.connect(self._faded)
+        self._rotate = QTimer(self, timeout=self.next_wallpaper)
+
+    def load_wallpapers(self, values: dict | None = None) -> None:
+        values = values or wallpaper.settings()
+        self._images = wallpaper.playlist(values)
+        self._index = -1
+        self._rotate.stop()
+        self.next_wallpaper(animate=False)
+        if len(self._images) > 1 and values["mode"] == "rotate":
+            self._rotate.start(values["minutes"] * 60_000)
+
+    def next_wallpaper(self, animate: bool = True) -> None:
+        if not self._images:
+            self._current = self._previous = None
+            self._cache.clear()
+            self.update()
+            return
+        for _ in range(len(self._images)):  # skip pictures that can't be read
+            self._index = (self._index + 1) % len(self._images)
+            image = QPixmap(self._images[self._index])
+            if not image.isNull():
+                break
+        else:
+            return
+        self._previous, self._current = (self._current if animate else None), image
+        self._cache = {k: v for k, v in self._cache.items() if k[0] in (id(self._previous), id(self._current))}
+        if self._previous is not None:
+            self._fade = 0.0
+            self._animation.start()
+        else:
+            self._fade = 1.0
+            self.update()
+
+    @property
+    def wallpaper_path(self) -> str:
+        return self._images[self._index] if self._images and self._index >= 0 else ""
+
+    def _faded(self, value) -> None:
+        self._fade = float(value)
+        if self._fade >= 1.0:
+            self._previous = None
+        self.update()
+
+    def _cover(self, image: QPixmap) -> QPixmap:
+        """The picture scaled to fill the window (cropped, never stretched), cached per size."""
+        key = (id(image), self.width(), self.height())
+        if key not in self._cache:
+            self._cache[key] = image.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        return self._cache[key]
+
+    def _draw(self, painter: QPainter, image: QPixmap) -> None:
+        scaled = self._cover(image)
+        painter.drawPixmap((self.width() - scaled.width()) // 2, (self.height() - scaled.height()) // 2, scaled)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), BLACK)
+        if self._current is not None:
+            if self._previous is not None:
+                self._draw(painter, self._previous)
+            painter.setOpacity(self._fade)
+            self._draw(painter, self._current)
+            painter.setOpacity(1.0)
+            veil = QLinearGradient(0, 0, 0, self.height())  # darker towards the tiles at the bottom
+            veil.setColorAt(0.0, with_alpha(BLACK, 0.68))  # the clock and the brand at the top
+            veil.setColorAt(0.2, with_alpha(BLACK, 0.48))
+            veil.setColorAt(0.55, with_alpha(BLACK, 0.55))
+            veil.setColorAt(1.0, with_alpha(BLACK, 0.82))
+            painter.fillRect(self.rect(), veil)
         center = QPointF(self.width() / 2, self.height() * 0.42)
         glow = QRadialGradient(center, max(self.width(), self.height()) * 0.55)
         glow.setColorAt(0.0, with_alpha(NEON_DEEP, 0.22))
         glow.setColorAt(0.5, with_alpha(NEON_DEEP, 0.06))
         glow.setColorAt(1.0, with_alpha(NEON_DEEP, 0.0))
         painter.fillRect(self.rect(), glow)
-        painter.setPen(QPen(with_alpha(NEON, 0.035), 1))
-        step = px(64)
-        for x in range(0, self.width(), step):
-            painter.drawLine(x, 0, x, self.height())
-        for y in range(0, self.height(), step):
-            painter.drawLine(0, y, self.width(), y)
+        if self._current is None:
+            painter.setPen(QPen(with_alpha(NEON, 0.035), 1))
+            step = px(64)
+            for x in range(0, self.width(), step):
+                painter.drawLine(x, 0, x, self.height())
+            for y in range(0, self.height(), step):
+                painter.drawLine(0, y, self.width(), y)
 
 
 class PiriLogo(QWidget):
@@ -984,6 +1067,7 @@ class MainDesktop(Backdrop):
         self.scanner.progress.connect(lambda _n: self.home.scan_button.set_badge("SCANNING"))
         self.scanner.finished.connect(lambda _r: self.home.scan_button.set_badge(""))
 
+        self.load_wallpapers()
         if DEV_MODE:
             QShortcut(QKeySequence("Ctrl+Q"), self, activated=self._quit_dev)
         self.home.steam_button.setFocus()
