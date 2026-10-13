@@ -133,8 +133,10 @@ class WindowWatcher:
         self._X = X
         self.d = xdisplay.Display(display)
         self.root = self.d.screen().root
-        # Pong replies are sent to the root window with SubstructureNotify|Redirect: listen to them.
-        self.root.change_attributes(event_mask=X.SubstructureNotifyMask)
+        # Pong replies are sent to the root window, and only reach clients selecting one of the masks they
+        # are sent with: GTK uses SubstructureNotify|Redirect, Qt 5 StructureNotify|SubstructureRedirect.
+        # Redirect belongs to the window manager, so select both Notify masks.
+        self.root.change_attributes(event_mask=X.SubstructureNotifyMask | X.StructureNotifyMask)
         atom = self.d.intern_atom
         self.atoms = {name: atom(name) for name in (
             "_NET_CLIENT_LIST", "_NET_WM_PID", "_NET_WM_NAME", "UTF8_STRING", "WM_PROTOCOLS", "_NET_WM_PING")}

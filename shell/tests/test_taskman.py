@@ -175,6 +175,43 @@ def test_frozen_window_is_reported_and_killed(x_server):
         d.close()
 
 
+QT_WINDOW = """
+import sys
+from PyQt5.QtWidgets import QApplication, QLabel
+app = QApplication(sys.argv)
+w = QLabel("PERDIX OS")
+w.setWindowTitle("PERDIX OS")
+w.show()
+app.processEvents()
+print(int(w.winId()), flush=True)
+app.exec_()
+"""
+
+
+def test_idle_qt_window_is_responding(x_server):
+    """Qt 5 answers pings with StructureNotify|SubstructureRedirect, not GTK's SubstructureNotify:
+    the desktop and the Control Center were reported as Not responding on the first real boot."""
+    from Xlib import Xatom, display as xdisplay
+    name, clients = x_server
+    qt = subprocess.Popen([sys.executable, "-c", QT_WINDOW], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          text=True, env={**os.environ, "DISPLAY": name, "QT_QPA_PLATFORM": "xcb"})
+    clients.append(qt)
+    line = qt.stdout.readline()
+    if not line:
+        pytest.skip("Qt's xcb platform plugin could not start")
+    d = xdisplay.Display(name)
+    d.screen().root.change_property(d.intern_atom("_NET_CLIENT_LIST"), Xatom.WINDOW, 32, [int(line)])
+    d.sync()
+    monitor = taskman.TaskMonitor(name)
+    try:
+        for _ in range(taskman.NOT_RESPONDING_AFTER + 1):
+            (app,) = [p for p in monitor.snapshot(ping_timeout=1.0).processes if p.is_app]
+            assert (app.window_title, app.responding) == ("PERDIX OS", True)
+    finally:
+        monitor.close()
+        d.close()
+
+
 def test_monitor_without_x(monkeypatch):
     monkeypatch.delenv("DISPLAY", raising=False)
     snap = taskman.TaskMonitor(display="").snapshot()
